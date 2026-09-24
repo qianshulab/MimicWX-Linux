@@ -70,19 +70,32 @@ impl ChatWnd {
             return; // 已缓存
         }
         let win = self.window_node.clone();
-        if let Some(node) = self.atspi.find_dfs(&win, &|role, _| {
-            if role == "entry" || role == "text" {
-                SearchAction::Found
-            } else if role == "list" {
-                SearchAction::Skip // 跳过消息列表
-            } else {
-                SearchAction::Recurse
-            }
-        }, 0, 15, 30).await {
+        if let Some(node) = self
+            .atspi
+            .find_dfs(
+                &win,
+                &|role, _| {
+                    if role == "entry" || role == "text" {
+                        SearchAction::Found
+                    } else if role == "list" {
+                        SearchAction::Skip // 跳过消息列表
+                    } else {
+                        SearchAction::Recurse
+                    }
+                },
+                0,
+                15,
+                30,
+            )
+            .await
+        {
             info!("[pin] [ChatWnd] 缓存输入框节点: {}", self.who);
             self.edit_box_node = Some(node);
         } else {
-            info!("[pin] [ChatWnd] 未找到输入框, 将使用偏移量方案: {}", self.who);
+            info!(
+                "[pin] [ChatWnd] 未找到输入框, 将使用偏移量方案: {}",
+                self.who
+            );
         }
     }
 
@@ -92,15 +105,29 @@ impl ChatWnd {
             return;
         }
         let win = self.window_node.clone();
-        if let Some(node) = self.atspi.find_dfs(&win, &|role, name| {
-            if role == "list" && (name.contains("消息") || name.contains("Messages") || name.contains("Message")) {
-                SearchAction::Found
-            } else if role == "list" {
-                SearchAction::Skip // 跳过其他 list
-            } else {
-                SearchAction::Recurse
-            }
-        }, 0, 15, 30).await {
+        if let Some(node) = self
+            .atspi
+            .find_dfs(
+                &win,
+                &|role, name| {
+                    if role == "list"
+                        && (name.contains("消息")
+                            || name.contains("Messages")
+                            || name.contains("Message"))
+                    {
+                        SearchAction::Found
+                    } else if role == "list" {
+                        SearchAction::Skip // 跳过其他 list
+                    } else {
+                        SearchAction::Recurse
+                    }
+                },
+                0,
+                15,
+                30,
+            )
+            .await
+        {
             info!("[pin] [ChatWnd] 缓存消息列表节点: {}", self.who);
             self.msg_list_node = Some(node);
         } else {
@@ -114,16 +141,11 @@ impl ChatWnd {
 
     /// 在此独立窗口中查找消息列表
     pub async fn find_message_list(&self) -> Option<NodeRef> {
-        self.atspi.find_bfs(&self.window_node, |role, name| {
-            role == "list" && (name.contains("消息") || name.contains("Messages"))
-        }).await
-    }
-
-    /// 在此独立窗口中查找输入框
-    pub async fn find_edit_box(&self) -> Option<NodeRef> {
-        self.atspi.find_bfs(&self.window_node, |role, _| {
-            role == "entry" || role == "text"
-        }).await
+        self.atspi
+            .find_bfs(&self.window_node, |role, name| {
+                role == "list" && (name.contains("消息") || name.contains("Messages"))
+            })
+            .await
     }
 
     // =================================================================
@@ -155,13 +177,20 @@ impl ChatWnd {
 
         // 4. 验证发送 (可跳过, 由 API 层的 DB 验证替代)
         let verified = if skip_verify {
-            debug!("[skip] [ChatWnd] 跳过 AT-SPI 验证 (将由 DB 验证): [{}]", self.who);
+            debug!(
+                "[skip] [ChatWnd] 跳过 AT-SPI 验证 (将由 DB 验证): [{}]",
+                self.who
+            );
             false
         } else {
             self.verify_sent(text).await
         };
 
-        let msg = if verified { "消息已发送" } else { "消息已发送 (未验证)" };
+        let msg = if verified {
+            "消息已发送"
+        } else {
+            "消息已发送 (未验证)"
+        };
         info!("[ok] [ChatWnd] 完成: [{}] verified={verified}", self.who);
         Ok((true, verified, msg.into()))
     }
@@ -195,7 +224,8 @@ impl ChatWnd {
     /// 激活独立窗口并聚焦输入框 (send_message/send_image/@ 的公共前置步骤)
     pub async fn activate_and_focus_input(&mut self, engine: &mut InputEngine) -> Result<()> {
         // 1. 将独立窗口提到前台 (X11 _NET_ACTIVE_WINDOW)
-        let activated = engine.activate_window_by_title(&self.who, false)
+        let activated = engine
+            .activate_window_by_title(&self.who, false)
             .unwrap_or(false);
         if !activated {
             // 回退: 点击标题栏
@@ -208,7 +238,9 @@ impl ChatWnd {
 
         // 2. 点击输入框 (缓存的精确坐标, 失效时自动重新搜索)
         let edit_valid = if let Some(ref edit_node) = self.edit_box_node {
-            self.atspi.bbox(edit_node).await
+            self.atspi
+                .bbox(edit_node)
+                .await
                 .map(|b| b.w > 0 && b.h > 0)
                 .unwrap_or(false)
         } else {
@@ -251,7 +283,9 @@ impl ChatWnd {
 
             // 检查缓存的消息列表节点是否仍然有效
             let cached_valid = if let Some(ref cached) = self.msg_list_node {
-                self.atspi.bbox(cached).await
+                self.atspi
+                    .bbox(cached)
+                    .await
                     .map(|b| b.w > 0 && b.h > 0)
                     .unwrap_or(false)
             } else {

@@ -1,6 +1,6 @@
 #!/bin/bash
 # MimicWX-Linux 容器启动脚本
-# 启动顺序: D-Bus → VNC → AT-SPI2 → WeChat → 密钥内存扫描 → noVNC → MimicWX
+# 启动顺序: D-Bus → VNC → AT-SPI2 → WeChat → noVNC → 密钥提取/验证 → MimicWX
 
 set +e  # 不因单个命令失败而退出
 
@@ -24,25 +24,23 @@ chown -R wechat:wechat /home/wechat/.xwechat
 mkdir -p /tmp/.X11-unix
 chmod 1777 /tmp/.X11-unix
 
-# VNC 密码
-su - wechat -c '
-  mkdir -p ~/.vnc
-  echo "mimicwx" | vncpasswd -f > ~/.vnc/passwd
-  chmod 600 ~/.vnc/passwd
-'
-
-# ============================================================
-# 密钥提取监视器 (内存扫描方式, root 后台)
-# 等待微信登录后自动扫描进程内存提取数据库密钥
-# ============================================================
-# 始终启动: extract_key.py 自带 HMAC 验证, 密钥有效时秒退
-setsid bash -c '
-    echo "[extract_key] 密钥提取监视器启动 (内存扫描模式)"
-    python3 /usr/local/bin/extract_key.py \
-      > /tmp/extract_key.log 2>&1 || true
-    echo "[extract_key] 密钥提取完成, 详见 /tmp/extract_key.log"
-  ' &
-
+# VNC 密码由 Compose secret 提供，避免写入镜像层或容器环境变量
+VNC_PASSWORD_FILE="${VNC_PASSWORD_FILE:-/run/secrets/vnc_password}"
+if [ ! -r "$VNC_PASSWORD_FILE" ]; then
+  echo "[start.sh] [err] VNC password secret is missing"
+  exit 1
+fi
+IFS= read -r VNC_PASSWORD < "$VNC_PASSWORD_FILE"
+if [ ${#VNC_PASSWORD} -lt 6 ]; then
+  echo "[start.sh] [err] VNC password must contain at least 6 characters"
+  exit 1
+fi
+install -d -m 700 -o wechat -g wechat /home/wechat/.vnc
+printf '%s\n' "$VNC_PASSWORD" | su -s /bin/bash wechat -c 'vncpasswd -f' \
+  > /home/wechat/.vnc/passwd
+chown wechat:wechat /home/wechat/.vnc/passwd
+chmod 600 /home/wechat/.vnc/passwd
+unset VNC_PASSWORD
 
 # ============================================================
 # 1-8) 用户空间服务 (wechat 用户)
@@ -160,6 +158,33 @@ su - wechat << 'USEREOF'
 USEREOF
 
 # ============================================================
+# 7.5) 数据库密钥生命周期 (root)
+# ============================================================
+# WeChat 4.1+ 不再在内存保留 raw key。首次使用通过 GDB 捕获一次
+# passphrase，之后按每个数据库的 salt 自动 PBKDF2 派生并 HMAC 验证。
+WECHAT_VERSION=$(dpkg-query -W -f='${Version}' wechat 2>/dev/null || true)
+echo "[extract_key] 微信版本: ${WECHAT_VERSION:-unknown}"
+case "$WECHAT_VERSION" in
+  4.0.*)
+    echo "[extract_key] 使用旧版内存扫描提取器"
+    python3 -u /usr/local/bin/extract_key_legacy.py \
+      > /tmp/extract_key.log 2>&1 || true
+    ;;
+  *)
+    echo "[extract_key] 使用微信 4.1+ 兼容提取器"
+    python3 -u /usr/local/bin/extract_key_compat.py once --capture-timeout 600 \
+      > /tmp/extract_key.log 2>&1 || true
+    setsid python3 -u /usr/local/bin/extract_key_compat.py monitor --interval 60 \
+      >> /tmp/extract_key.log 2>&1 &
+    # 保持一个断点监听器待命；未来重新登录导致 passphrase 轮换时自动捕获。
+    setsid python3 -u /usr/local/bin/extract_key_compat.py watch \
+      --capture-timeout 86400 --retry-delay 10 \
+      >> /tmp/extract_key.log 2>&1 &
+    ;;
+esac
+echo "[extract_key] 启动校验完成, 详见 /tmp/extract_key.log"
+
+# ============================================================
 # 8) MimicWX (heredoc 之外运行, 保留 stdin 用于控制台命令)
 # ============================================================
 echo "=============================="
@@ -181,12 +206,18 @@ while true; do
     echo "[start.sh] [retry] MimicWX 重启中 (3秒后)..."
     sleep 3
 
-    # ---- 重新提取密钥 (确保 /restart 后使用最新密钥) ----
-    echo "[start.sh] [retry] 重新提取数据库密钥..."
-    rm -f /home/wechat/.xwechat/wechat_key.txt /tmp/wechat_key.txt \
-          /home/wechat/.xwechat/wechat_keys.json /tmp/wechat_keys.json 2>/dev/null || true
-    python3 /usr/local/bin/extract_key.py > /tmp/extract_key.log 2>&1 || true
-    echo "[start.sh] [retry] 密钥提取完成"
+    # ---- 重新验证/派生密钥 (不删除仍然有效的缓存) ----
+    echo "[start.sh] [retry] 重新验证数据库密钥..."
+    case "$WECHAT_VERSION" in
+      4.0.*)
+        python3 -u /usr/local/bin/extract_key_legacy.py >> /tmp/extract_key.log 2>&1 || true
+        ;;
+      *)
+        python3 -u /usr/local/bin/extract_key_compat.py once --capture-timeout 600 \
+          >> /tmp/extract_key.log 2>&1 || true
+        ;;
+    esac
+    echo "[start.sh] [retry] 密钥验证完成"
 
     echo "[start.sh] [retry] 重新启动 MimicWX..."
     continue

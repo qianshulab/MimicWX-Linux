@@ -22,10 +22,17 @@ __pycache__/
 .mypy_cache/
 .pytest_cache/
 
+# Local deployment state and secrets
+.env
+data/
+secrets/
+config.local.toml
+*.key
+*.pem
+
 # Debug dumps
 *.txt
 !README.txt
 
 # Excluded directories
 Yunzai/
-Docs/

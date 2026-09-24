@@ -10,8 +10,8 @@
 //! - config: 配置文件管理
 //! - console: 交互式控制台
 
-mod atspi;
 mod api;
+mod atspi;
 mod chatwnd;
 mod config;
 mod console;
@@ -21,10 +21,9 @@ mod wechat;
 
 use anyhow::Result;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
 use tracing::{debug, error, info, warn};
-
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,7 +36,10 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    info!("[init] MimicWX-Linux v{} 启动中...", env!("CARGO_PKG_VERSION"));
+    info!(
+        "[init] MimicWX-Linux v{} 启动中...",
+        env!("CARGO_PKG_VERSION")
+    );
 
     // ① 加载配置文件
     let (config, config_path) = config::load_config();
@@ -72,7 +74,10 @@ async fn main() -> Result<()> {
     };
 
     // ④ WeChat 实例化 (AT-SPI 部分, 用于发送)
-    let wechat = Arc::new(wechat::WeChat::new(atspi.clone(), config.timing.at_delay_ms));
+    let wechat = Arc::new(wechat::WeChat::new(
+        atspi.clone(),
+        config.timing.at_delay_ms,
+    ));
 
     // ⑤ 等待微信就绪
     let mut attempts = 0;
@@ -114,7 +119,10 @@ async fn main() -> Result<()> {
     // ⑥ 读取数据库密钥 (内存扫描提取) + 初始化 DbManager
     // extract_key.py 在后台持续运行 (由 start.sh 以 root 启动, 无超时)
     // 这里只需等待密钥文件出现
-    let key_paths = ["/home/wechat/.xwechat/wechat_key.txt", "/tmp/wechat_key.txt"];
+    let key_paths = [
+        "/home/wechat/.xwechat/wechat_key.txt",
+        "/tmp/wechat_key.txt",
+    ];
     for i in 0..60 {
         if key_paths.iter().any(|p| std::path::Path::new(p).exists()) {
             break;
@@ -125,7 +133,8 @@ async fn main() -> Result<()> {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
 
-    let key_path = key_paths.iter()
+    let key_path = key_paths
+        .iter()
         .find(|p| std::path::Path::new(p).exists())
         .copied()
         .unwrap_or(key_paths[0]);
@@ -134,7 +143,12 @@ async fn main() -> Result<()> {
         Ok(key) => {
             let key = key.trim().to_string();
             if key.len() == 96 || key.len() == 64 {
-                info!("[key] 数据库密钥已获取 ({}...{}) [{}hex]", &key[..8], &key[key.len()-8..], key.len());
+                info!(
+                    "[key] 数据库密钥已获取 ({}...{}) [{}hex]",
+                    &key[..8],
+                    &key[key.len() - 8..],
+                    key.len()
+                );
 
                 // 查找数据库目录
                 let db_dir = find_db_dir();
@@ -146,19 +160,29 @@ async fn main() -> Result<()> {
                                 let mut final_mgr = Arc::new(mgr);
                                 // 等待微信创建消息数据库后再标记已读
                                 // 首次登录时 message_N.db 可能尚未创建, 需要重试等待
-                                let mark_ok = {
+                                let mark_ok = if final_mgr.has_persisted_watermarks().await {
+                                    info!("[cursor] 使用持久化水位线，重启期间消息将自动补拉");
+                                    true
+                                } else {
                                     let mut ok = false;
                                     for attempt in 0..10 {
                                         let wait = if attempt == 0 { 5 } else { 3 };
-                                        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                                        tokio::time::sleep(std::time::Duration::from_secs(wait))
+                                            .await;
                                         match final_mgr.mark_all_read().await {
-                                            Ok(()) => { ok = true; break; }
+                                            Ok(()) => {
+                                                ok = true;
+                                                break;
+                                            }
                                             Err(e) => {
                                                 if attempt < 9 {
                                                     debug!("[wait] 消息数据库尚未就绪 (第{}次), {}秒后重试: {}",
                                                         attempt + 1, 3, e);
                                                 } else {
-                                                    warn!("[warn] 标记已读失败 (已重试10次): {}", e);
+                                                    warn!(
+                                                        "[warn] 标记已读失败 (已重试10次): {}",
+                                                        e
+                                                    );
                                                 }
                                             }
                                         }
@@ -174,22 +198,32 @@ async fn main() -> Result<()> {
                                 if !mark_ok {
                                     info!("[key] 解密失败, 可能密钥过期 — 等待 extract_key.py 提取新密钥...");
                                     let key_json = "/home/wechat/.xwechat/wechat_keys.json";
-                                    let old_mtime = std::fs::metadata(key_json)
-                                        .and_then(|m| m.modified()).ok();
+                                    let old_mtime =
+                                        std::fs::metadata(key_json).and_then(|m| m.modified()).ok();
                                     for _ in 0..30 {
                                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                                         let new_mtime = std::fs::metadata(key_json)
-                                            .and_then(|m| m.modified()).ok();
+                                            .and_then(|m| m.modified())
+                                            .ok();
                                         if new_mtime != old_mtime && new_mtime.is_some() {
                                             info!("[key] 检测到新密钥, 重新初始化...");
-                                            let new_key = key_paths.iter()
+                                            let new_key = key_paths
+                                                .iter()
                                                 .find_map(|p| std::fs::read_to_string(p).ok())
-                                                .unwrap_or_default().trim().to_string();
+                                                .unwrap_or_default()
+                                                .trim()
+                                                .to_string();
                                             if !new_key.is_empty() {
-                                                match db::DbManager::new(new_key, dir_for_retry.clone()) {
+                                                match db::DbManager::new(
+                                                    new_key,
+                                                    dir_for_retry.clone(),
+                                                ) {
                                                     Ok(new_mgr) => {
                                                         let new_mgr = Arc::new(new_mgr);
-                                                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                                        tokio::time::sleep(
+                                                            std::time::Duration::from_secs(3),
+                                                        )
+                                                        .await;
                                                         let _ = new_mgr.mark_all_read().await;
                                                         let _ = new_mgr.refresh_contacts().await;
                                                         info!("[ok] 新密钥解密成功, DbManager 已重新初始化");
@@ -228,6 +262,7 @@ async fn main() -> Result<()> {
 
     // ⑦ 广播通道 (WebSocket)
     let (tx, _) = tokio::sync::broadcast::channel::<String>(128);
+    let message_store = Arc::new(api::MessageStore::new(4096));
 
     // ⑧ InputEngine Actor + API 服务
     let (input_tx, input_rx) = tokio::sync::mpsc::channel::<api::InputCommand>(32);
@@ -245,6 +280,7 @@ async fn main() -> Result<()> {
         input_tx: input_tx.clone(),
         tx: tx.clone(),
         db: db_manager.clone(),
+        messages: message_store.clone(),
         api_token: config.api.token.filter(|t| !t.is_empty()),
         start_time: std::time::Instant::now(),
         config_path: config_path.clone(),
@@ -254,7 +290,7 @@ async fn main() -> Result<()> {
     let addr = "0.0.0.0:8899";
     info!("🌐 API 服务启动: http://{addr}");
     info!("📡 WebSocket: ws://{addr}/ws");
-    info!("[pin] 端点: /status, /contacts, /sessions, /messages/new, /send, /chat, /listen, /ws");
+    info!("[pin] 端点: /status, /contacts, /sessions, /messages, /messages/history, /messages/send, /messages/reply, /attachments/:id, /ws");
     if state.api_token.is_some() {
         info!("🔒 API 认证已启用 (Bearer Token)");
     } else {
@@ -317,6 +353,7 @@ async fn main() -> Result<()> {
     // ⑨ 后台数据库消息监听任务
     if let Some(db) = db_manager {
         let listen_tx = tx.clone();
+        let listen_messages = message_store.clone();
 
         // ⑨-a) 联系人定时刷新 (每 5 分钟, 新好友/群不用重启就有名字)
         {
@@ -342,10 +379,8 @@ async fn main() -> Result<()> {
 
             loop {
                 // 等待 WAL 变化通知 (fanotify 已过滤自身事件, 无需防抖)
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    wal_rx.recv(),
-                ).await {
+                match tokio::time::timeout(std::time::Duration::from_secs(30), wal_rx.recv()).await
+                {
                     Ok(Ok(())) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
                     Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
                         error!("[err] WAL 监听通道关闭");
@@ -359,22 +394,13 @@ async fn main() -> Result<()> {
                 // 拉取新消息
                 match db.get_new_messages().await {
                     Ok(msgs) => {
-                        for m in &msgs {
-                            let json = serde_json::json!({
-                                "type": "db_message",
-                                "chat": m.chat,
-                                "chat_display": m.chat_display_name,
-                                "talker": m.talker,
-                                "talker_display": m.talker_display_name,
-                                "content": m.content,
-                                "parsed": m.parsed,
-                                "msg_type": m.msg_type,
-                                "create_time": m.create_time,
-                                "local_id": m.local_id,
-                                "is_self": m.is_self,
-                                "is_at_me": m.is_at_me,
-                                "at_user_list": m.at_user_list,
-                            });
+                        for m in msgs {
+                            let stored = listen_messages.push(m).await;
+                            let mut json = serde_json::to_value(&stored)
+                                .unwrap_or_else(|_| serde_json::json!({}));
+                            if let Some(object) = json.as_object_mut() {
+                                object.insert("type".into(), serde_json::json!("db_message"));
+                            }
                             let _ = listen_tx.send(json.to_string());
                         }
                     }
@@ -395,14 +421,21 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             // 等待 API 服务就绪 + 微信窗口稳定
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            info!("[table] 开始自动添加监听 ({} 个目标)...", auto_targets.len());
+            info!(
+                "[table] 开始自动添加监听 ({} 个目标)...",
+                auto_targets.len()
+            );
 
             for target in &auto_targets {
                 let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                if auto_input_tx.send(api::InputCommand::AddListen {
-                    who: target.clone(),
-                    reply: reply_tx,
-                }).await.is_err() {
+                if auto_input_tx
+                    .send(api::InputCommand::AddListen {
+                        who: target.clone(),
+                        reply: reply_tx,
+                    })
+                    .await
+                    .is_err()
+                {
                     warn!("[warn] InputEngine actor 已停止, 无法自动添加监听");
                     break;
                 }
@@ -429,7 +462,16 @@ async fn main() -> Result<()> {
         let console_input_tx = input_tx.clone();
         let console_config_path = config_path.clone();
         tokio::spawn(async move {
-            console::console_loop(console_exit, console_shutdown, console_wechat, console_db_ref, console_tx, console_input_tx, console_config_path).await;
+            console::console_loop(
+                console_exit,
+                console_shutdown,
+                console_wechat,
+                console_db_ref,
+                console_tx,
+                console_input_tx,
+                console_config_path,
+            )
+            .await;
         });
     }
 
@@ -489,7 +531,8 @@ fn find_db_dir() -> Option<PathBuf> {
                 let db_storage = entry.path().join("db_storage");
                 if db_storage.exists() {
                     let msg_dir = db_storage.join("message");
-                    let mtime = msg_dir.metadata()
+                    let mtime = msg_dir
+                        .metadata()
                         .and_then(|m| m.modified())
                         .unwrap_or(std::time::UNIX_EPOCH);
                     debug!("📂 候选: {} (mtime={:?})", db_storage.display(), mtime);
@@ -504,7 +547,11 @@ fn find_db_dir() -> Option<PathBuf> {
         candidates.sort_by(|a, b| b.1.cmp(&a.1));
         let chosen = &candidates[0].0;
         if candidates.len() > 1 {
-            info!("📂 发现 {} 个账号目录, 选择最新的: {}", candidates.len(), chosen.display());
+            info!(
+                "📂 发现 {} 个账号目录, 选择最新的: {}",
+                candidates.len(),
+                chosen.display()
+            );
         } else {
             info!("📂 数据库目录: {}", chosen.display());
         }
@@ -526,4 +573,3 @@ fn dirs_or_home() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/root"))
 }
-

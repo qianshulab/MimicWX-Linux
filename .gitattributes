@@ -1,0 +1,5 @@
+/Dockerfile text eol=lf
+/docker/*.sh text eol=lf
+/docker/*.py text eol=lf
+/vendor/wcdb-key-tool/LICENSE text eol=lf
+/vendor/wcdb-key-tool/*.py text eol=lf

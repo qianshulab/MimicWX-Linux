@@ -7,12 +7,12 @@
 //! - 独立窗口管理: ChatWnd 弹出/监听/关闭
 
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use crate::atspi::{AtSpi, NodeRef, SearchAction, is_structural_role};
+use crate::atspi::{is_structural_role, AtSpi, BBox, NodeRef, SearchAction};
 use crate::chatwnd::ChatWnd;
 use crate::input::InputEngine;
 
@@ -59,7 +59,10 @@ struct CachedNode {
 
 impl CachedNode {
     fn new(node: NodeRef) -> Self {
-        Self { node, cached_at: tokio::time::Instant::now() }
+        Self {
+            node,
+            cached_at: tokio::time::Instant::now(),
+        }
     }
 
     fn get(&self, ttl_secs: u64) -> Option<&NodeRef> {
@@ -75,6 +78,8 @@ pub struct WeChat {
     atspi: Arc<AtSpi>,
     /// 独立聊天窗口集合 (who → ChatWnd)
     pub listen_windows: Mutex<HashMap<String, ChatWnd>>,
+    /// 用户明确配置的监听目标。失效窗口只允许为这些目标自动重建。
+    listen_targets: Mutex<HashSet<String>>,
     /// 当前活跃的聊天名称 (避免重复点击同一会话触发双击)
     pub current_chat: Mutex<Option<String>>,
     /// @ 输入流程每步延迟 (ms, 来自 config.toml, 支持热更新)
@@ -90,6 +95,7 @@ impl WeChat {
         Self {
             atspi,
             listen_windows: Mutex::new(HashMap::new()),
+            listen_targets: Mutex::new(HashSet::new()),
             current_chat: Mutex::new(None),
             at_delay_ms: std::sync::atomic::AtomicU64::new(at_delay_ms),
             cached_app: Mutex::new(None),
@@ -104,7 +110,8 @@ impl WeChat {
 
     /// 热更新 @ 延迟 (ms)
     pub fn set_at_delay_ms(&self, ms: u64) {
-        self.at_delay_ms.store(ms, std::sync::atomic::Ordering::Relaxed);
+        self.at_delay_ms
+            .store(ms, std::sync::atomic::Ordering::Relaxed);
     }
 
     // =================================================================
@@ -186,16 +193,18 @@ impl WeChat {
 
     /// 查找导航工具栏 [tool bar] "导航" — 用于判断登录状态
     pub async fn find_nav_toolbar(&self, app: &NodeRef) -> Option<NodeRef> {
-        self.atspi.find_bfs(app, |role, name| {
-            role == "tool bar" && (name.contains("导航") || name.contains("Navigation"))
-        }).await
+        self.atspi
+            .find_bfs(app, |role, name| {
+                role == "tool bar" && (name.contains("导航") || name.contains("Navigation"))
+            })
+            .await
     }
 
     /// 查找 [splitter] — 会话列表和聊天区域的容器
     pub async fn find_split_pane(&self, app: &NodeRef) -> Option<NodeRef> {
-        self.atspi.find_bfs(app, |role, _| {
-            role == "splitter" || role == "split pane"
-        }).await
+        self.atspi
+            .find_bfs(app, |role, _| role == "splitter" || role == "split pane")
+            .await
     }
 
     /// 会话列表 — DFS 查找 [list] name='Chats' (带 10s TTL 缓存)
@@ -210,13 +219,22 @@ impl WeChat {
             }
         }
 
-        let result = self.atspi.find_dfs(app, &|role, name| {
-            if role == "list" && (name.contains("Chats") || name.contains("会话")) {
-                SearchAction::Found
-            } else {
-                SearchAction::Recurse
-            }
-        }, 0, 18, 20).await;
+        let result = self
+            .atspi
+            .find_dfs(
+                app,
+                &|role, name| {
+                    if role == "list" && (name.contains("Chats") || name.contains("会话")) {
+                        SearchAction::Found
+                    } else {
+                        SearchAction::Recurse
+                    }
+                },
+                0,
+                18,
+                20,
+            )
+            .await;
         if let Some(ref node) = result {
             debug!("[find_session_list] 找到会话列表");
             *self.cached_session_list.lock().await = Some(CachedNode::new(node.clone()));
@@ -226,28 +244,69 @@ impl WeChat {
 
     /// 消息列表 — DFS 查找 [list] name='Messages'
     pub async fn find_message_list(&self, app: &NodeRef) -> Option<NodeRef> {
-        let result = self.atspi.find_dfs(app, &|role, name| {
-            if role == "list" && (name.contains("Messages") || name.contains("消息")) {
-                SearchAction::Found
-            } else {
-                SearchAction::Recurse
-            }
-        }, 0, 18, 20).await;
+        let result = self
+            .atspi
+            .find_dfs(
+                app,
+                &|role, name| {
+                    if role == "list" && (name.contains("Messages") || name.contains("消息")) {
+                        SearchAction::Found
+                    } else {
+                        SearchAction::Recurse
+                    }
+                },
+                0,
+                18,
+                20,
+            )
+            .await;
         if result.is_some() {
             debug!("[find_message_list] 找到消息列表");
         }
         result
     }
 
-    /// 在 app 范围内查找输入框 (role=entry 或 role=text) — DFS 到 depth 18
+    /// 查找消息输入框。微信同时暴露顶部搜索框，因此选择屏幕位置最低的可见文本框。
     pub async fn find_edit_box(&self, app: &NodeRef) -> Option<NodeRef> {
-        self.atspi.find_dfs(app, &|role, _| {
-            if role == "entry" || role == "text" {
-                SearchAction::Found
-            } else {
-                SearchAction::Recurse
+        let mut frontier = vec![app.clone()];
+        let mut best: Option<(NodeRef, i64)> = None;
+        let mut visited = 0usize;
+        for _depth in 0..18 {
+            if frontier.is_empty() || visited >= 500 {
+                break;
             }
-        }, 0, 18, 20).await
+            let mut next = Vec::new();
+            for node in frontier {
+                let count = self.atspi.child_count(&node).await;
+                for index in 0..count.min(50) {
+                    let Some(child) = self.atspi.child_at(&node, index).await else {
+                        continue;
+                    };
+                    visited += 1;
+                    let role = self.atspi.role(&child).await;
+                    if role == "entry" || role == "text" {
+                        if let Some(bbox) = self.atspi.bbox(&child).await {
+                            if bbox.w >= 120 && bbox.h >= 40 {
+                                let bottom = i64::from(bbox.y + bbox.h);
+                                let area = i64::from(bbox.w) * i64::from(bbox.h);
+                                let score = bottom * 1_000_000 + area;
+                                if best.as_ref().is_none_or(|(_, current)| score > *current) {
+                                    best = Some((child.clone(), score));
+                                }
+                            }
+                        }
+                    }
+                    if self.atspi.child_count(&child).await > 0 {
+                        next.push(child);
+                    }
+                    if visited >= 500 {
+                        break;
+                    }
+                }
+            }
+            frontier = next;
+        }
+        best.map(|(node, _)| node)
     }
 
     /// 在会话容器中按名称查找联系人 (BFS 穿透 filler 层级)
@@ -257,7 +316,9 @@ impl WeChat {
 
         let mut frontier = vec![container.clone()];
         for _depth in 0..6 {
-            if frontier.is_empty() { break; }
+            if frontier.is_empty() {
+                break;
+            }
             let mut next = Vec::new();
             for node in &frontier {
                 let count = self.atspi.child_count(node).await;
@@ -314,7 +375,10 @@ impl WeChat {
                 let trimmed = name.trim().to_string();
                 if trimmed.len() > 1 {
                     let has_new = self.check_session_has_new(&child).await;
-                    sessions.push(SessionInfo { name: trimmed, has_new });
+                    sessions.push(SessionInfo {
+                        name: trimmed,
+                        has_new,
+                    });
                 }
             }
         }
@@ -341,6 +405,23 @@ impl WeChat {
         false
     }
 
+    /// 获取微信主窗口坐标。
+    async fn main_window_bbox(&self) -> Option<BBox> {
+        let app = self.find_app().await?;
+        let count = self.atspi.child_count(&app).await;
+        for i in 0..count.min(10) {
+            let child = self.atspi.child_at(&app, i).await?;
+            let role = self.atspi.role(&child).await;
+            let name = self.atspi.name(&child).await;
+            if role == "frame" && is_wechat_main(&name) {
+                if let Some(bbox) = self.atspi.bbox(&child).await {
+                    return Some(bbox);
+                }
+            }
+        }
+        None
+    }
+
     /// 激活主窗口 (X11 原生 _NET_ACTIVE_WINDOW)
     /// 确保主窗口在独立窗口之上
     async fn focus_main_window(&self, engine: &mut InputEngine) {
@@ -358,24 +439,13 @@ impl WeChat {
         }
 
         // 策略 2: AT-SPI 坐标点击 (回退)
-        if let Some(app) = self.find_app().await {
-            let count = self.atspi.child_count(&app).await;
-            for i in 0..count.min(10) {
-                if let Some(child) = self.atspi.child_at(&app, i).await {
-                    let role = self.atspi.role(&child).await;
-                    let name = self.atspi.name(&child).await;
-                    if role == "frame" && is_wechat_main(&name) {
-                        if let Some(bbox) = self.atspi.bbox(&child).await {
-                            let cx = (bbox.x + bbox.w / 2).max(0);
-                            let cy = (bbox.y + 15).max(0);
-                            debug!("[mouse] AT-SPI 点击主窗口聚焦: ({cx}, {cy})");
-                            let _ = engine.click(cx, cy).await;
-                            tokio::time::sleep(ms(300)).await;
-                            return;
-                        }
-                    }
-                }
-            }
+        if let Some(bbox) = self.main_window_bbox().await {
+            let cx = (bbox.x + bbox.w / 2).max(0);
+            let cy = (bbox.y + 15).max(0);
+            debug!("[mouse] AT-SPI 点击主窗口聚焦: ({cx}, {cy})");
+            let _ = engine.click(cx, cy).await;
+            tokio::time::sleep(ms(300)).await;
+            return;
         }
         warn!("[warn] 无法聚焦主窗口");
     }
@@ -383,11 +453,7 @@ impl WeChat {
     /// 切换到指定聊天 (借鉴 wxauto ChatWith)
     ///
     /// 逻辑: 检查是否已在目标聊天 → 在会话列表找 → 找不到则 Ctrl+F 搜索
-    pub async fn chat_with(
-        &self,
-        engine: &mut InputEngine,
-        who: &str,
-    ) -> Result<Option<String>> {
+    pub async fn chat_with(&self, engine: &mut InputEngine, who: &str) -> Result<Option<String>> {
         // 快速路径: 已在目标聊天时跳过切换 (避免重复点击触发双击弹窗)
         {
             let current = self.current_chat.lock().await;
@@ -404,7 +470,9 @@ impl WeChat {
         // 先聚焦主窗口 (独立窗口可能遮挡)
         self.focus_main_window(engine).await;
 
-        let app = self.find_app().await
+        let app = self
+            .find_app()
+            .await
             .ok_or_else(|| anyhow::anyhow!("找不到微信应用"))?;
 
         // 1. 尝试在会话列表中直接定位
@@ -415,20 +483,35 @@ impl WeChat {
                     debug!("[session] 会话列表找到 [{who}], 点击 ({cx}, {cy})");
                     engine.click(cx, cy).await?;
                     // 轮询等待消息列表出现 (替代固定 500ms)
-                    let loaded = wait_for(&self.atspi, &app, 1500, 50,
-                        |atspi, app| {
-                            let atspi = atspi.clone();
-                            let app = app.clone();
-                            async move {
-                                atspi.find_dfs(&app, &|role, name| {
-                                    if role == "list" && (name.contains("消息") || name.contains("Messages")) {
-                                        SearchAction::Found
-                                    } else { SearchAction::Recurse }
-                                }, 0, 18, 20).await.is_some()
-                            }
+                    let loaded = wait_for(&self.atspi, &app, 1500, 50, |atspi, app| {
+                        let atspi = atspi.clone();
+                        let app = app.clone();
+                        async move {
+                            atspi
+                                .find_dfs(
+                                    &app,
+                                    &|role, name| {
+                                        if role == "list"
+                                            && (name.contains("消息") || name.contains("Messages"))
+                                        {
+                                            SearchAction::Found
+                                        } else {
+                                            SearchAction::Recurse
+                                        }
+                                    },
+                                    0,
+                                    18,
+                                    20,
+                                )
+                                .await
+                                .is_some()
                         }
-                    ).await;
-                    debug!("[session] ChatWith 点击后消息列表: {}", if loaded { "已就绪" } else { "超时" });
+                    })
+                    .await;
+                    debug!(
+                        "[session] ChatWith 点击后消息列表: {}",
+                        if loaded { "已就绪" } else { "超时" }
+                    );
                     *self.current_chat.lock().await = Some(who.to_string());
                     return Ok(Some(who.to_string()));
                 }
@@ -441,19 +524,29 @@ impl WeChat {
         // Ctrl+F 打开搜索
         engine.key_combo("ctrl+f").await?;
         // 轮询等待搜索输入框出现 (替代固定 500ms)
-        wait_for(&self.atspi, &app, 800, 50,
-            |atspi, app| {
-                let atspi = atspi.clone();
-                let app = app.clone();
-                async move {
-                    atspi.find_dfs(&app, &|role, _| {
-                        if role == "entry" || role == "text" {
-                            SearchAction::Found
-                        } else { SearchAction::Recurse }
-                    }, 0, 18, 20).await.is_some()
-                }
+        wait_for(&self.atspi, &app, 800, 50, |atspi, app| {
+            let atspi = atspi.clone();
+            let app = app.clone();
+            async move {
+                atspi
+                    .find_dfs(
+                        &app,
+                        &|role, _| {
+                            if role == "entry" || role == "text" {
+                                SearchAction::Found
+                            } else {
+                                SearchAction::Recurse
+                            }
+                        },
+                        0,
+                        18,
+                        20,
+                    )
+                    .await
+                    .is_some()
             }
-        ).await;
+        })
+        .await;
 
         // 清除可能的旧搜索内容
         engine.key_combo("ctrl+a").await?;
@@ -462,55 +555,96 @@ impl WeChat {
         // 粘贴搜索关键词
         engine.paste_text(who).await?;
         // 轮询等待搜索结果出现 (替代固定 1500ms, 最多等 2s)
-        wait_for(&self.atspi, &app, 2000, 100,
-            |atspi, app| {
-                let atspi = atspi.clone();
-                let app = app.clone();
-                async move {
-                    // 搜索结果出现时会有新的 list item
-                    atspi.find_dfs(&app, &|role, name| {
-                        if role == "list" && !name.contains("Chats") && !name.contains("会话") && !name.is_empty() {
-                            SearchAction::Found
-                        } else { SearchAction::Recurse }
-                    }, 0, 18, 20).await.is_some()
-                }
+        wait_for(&self.atspi, &app, 2000, 100, |atspi, app| {
+            let atspi = atspi.clone();
+            let app = app.clone();
+            async move {
+                // 搜索结果出现时会有新的 list item
+                atspi
+                    .find_dfs(
+                        &app,
+                        &|role, name| {
+                            if role == "list"
+                                && !name.contains("Chats")
+                                && !name.contains("会话")
+                                && !name.is_empty()
+                            {
+                                SearchAction::Found
+                            } else {
+                                SearchAction::Recurse
+                            }
+                        },
+                        0,
+                        18,
+                        20,
+                    )
+                    .await
+                    .is_some()
             }
-        ).await;
+        })
+        .await;
 
         // 选择第一个搜索结果 (Enter)
         engine.press_enter().await?;
         // 轮询等待消息列表出现 (替代固定 800ms)
-        let loaded = wait_for(&self.atspi, &app, 2000, 50,
-            |atspi, app| {
-                let atspi = atspi.clone();
-                let app = app.clone();
-                async move {
-                    atspi.find_dfs(&app, &|role, name| {
-                        if role == "list" && (name.contains("消息") || name.contains("Messages")) {
-                            SearchAction::Found
-                        } else { SearchAction::Recurse }
-                    }, 0, 18, 20).await.is_some()
-                }
+        let loaded = wait_for(&self.atspi, &app, 2000, 50, |atspi, app| {
+            let atspi = atspi.clone();
+            let app = app.clone();
+            async move {
+                atspi
+                    .find_dfs(
+                        &app,
+                        &|role, name| {
+                            if role == "list"
+                                && (name.contains("消息") || name.contains("Messages"))
+                            {
+                                SearchAction::Found
+                            } else {
+                                SearchAction::Recurse
+                            }
+                        },
+                        0,
+                        18,
+                        20,
+                    )
+                    .await
+                    .is_some()
             }
-        ).await;
-        debug!("[session] 搜索切换后消息列表: {}", if loaded { "已就绪" } else { "超时" });
+        })
+        .await;
+        debug!(
+            "[session] 搜索切换后消息列表: {}",
+            if loaded { "已就绪" } else { "超时" }
+        );
 
         // Esc 关闭搜索框 (借鉴 wxauto _refresh)
         engine.press_key("Escape").await?;
         // 轮询等待消息列表恢复 (替代固定 500ms)
-        wait_for(&self.atspi, &app, 800, 50,
-            |atspi, app| {
-                let atspi = atspi.clone();
-                let app = app.clone();
-                async move {
-                    atspi.find_dfs(&app, &|role, name| {
-                        if role == "list" && (name.contains("消息") || name.contains("Messages")) {
-                            SearchAction::Found
-                        } else { SearchAction::Recurse }
-                    }, 0, 18, 20).await.is_some()
-                }
+        wait_for(&self.atspi, &app, 800, 50, |atspi, app| {
+            let atspi = atspi.clone();
+            let app = app.clone();
+            async move {
+                atspi
+                    .find_dfs(
+                        &app,
+                        &|role, name| {
+                            if role == "list"
+                                && (name.contains("消息") || name.contains("Messages"))
+                            {
+                                SearchAction::Found
+                            } else {
+                                SearchAction::Recurse
+                            }
+                        },
+                        0,
+                        18,
+                        20,
+                    )
+                    .await
+                    .is_some()
             }
-        ).await;
+        })
+        .await;
 
         // 验证是否切换成功
         if self.find_message_list(&app).await.is_some() {
@@ -534,14 +668,13 @@ impl WeChat {
     /// 添加监听目标 — 弹出独立窗口
     ///
     /// 流程: ChatWith 切换 → 双击弹出独立窗口 → 在 Registry 中查找新窗口
-    pub async fn add_listen(
-        &self,
-        engine: &mut InputEngine,
-        who: &str,
-    ) -> Result<bool> {
+    pub async fn add_listen(&self, engine: &mut InputEngine, who: &str) -> Result<bool> {
         info!("[listen] 添加监听: {who}");
+        self.listen_targets.lock().await.insert(who.to_string());
 
-        let app = self.find_app().await
+        let app = self
+            .find_app()
+            .await
             .ok_or_else(|| anyhow::anyhow!("找不到微信应用"))?;
 
         // 1. 先检查是否已有记录
@@ -573,7 +706,7 @@ impl WeChat {
         for attempt in 0..3u32 {
             if attempt > 0 {
                 info!("[listen] 第 {} 次重试添加监听: {who}", attempt + 1);
-                tokio::time::sleep(ms(1000 + attempt * 500)).await;
+                tokio::time::sleep(ms(1000 + u64::from(attempt) * 500)).await;
             }
 
             // 2. 点击主窗口确保聚焦 (避免被旧的独立窗口遮挡)
@@ -593,7 +726,9 @@ impl WeChat {
                         engine.double_click(cx, cy).await?;
                         debug!("[listen] 双击会话弹出独立窗口: ({cx}, {cy})");
                         true
-                    } else { false }
+                    } else {
+                        false
+                    }
                 } else {
                     warn!("[listen] 未找到会话项: {who} (attempt {})", attempt + 1);
                     false
@@ -608,51 +743,58 @@ impl WeChat {
             }
 
             // 轮询等待独立窗口出现 (增加超时: 3000ms)
-            let appeared = wait_for(&self.atspi, &app, 3000, 100,
-                |atspi, app| {
-                    let atspi = atspi.clone();
-                    let app = app.clone();
-                    let who_owned = who.to_string();
-                    async move {
-                        let count = atspi.child_count(&app).await;
-                        for i in 0..count.min(20) {
-                            if let Some(child) = atspi.child_at(&app, i).await {
-                                let role = atspi.role(&child).await;
-                                let name = atspi.name(&child).await;
-                                if role == "frame" && name.contains(&who_owned) && !is_wechat_main(&name) {
-                                    return true;
-                                }
+            let appeared = wait_for(&self.atspi, &app, 3000, 100, |atspi, app| {
+                let atspi = atspi.clone();
+                let app = app.clone();
+                let who_owned = who.to_string();
+                async move {
+                    let count = atspi.child_count(&app).await;
+                    for i in 0..count.min(20) {
+                        if let Some(child) = atspi.child_at(&app, i).await {
+                            let role = atspi.role(&child).await;
+                            let name = atspi.name(&child).await;
+                            if role == "frame"
+                                && name.contains(&who_owned)
+                                && !is_wechat_main(&name)
+                            {
+                                return true;
                             }
                         }
-                        false
                     }
+                    false
                 }
-            ).await;
-            debug!("[listen] 独立窗口弹出: {}", if appeared { "已检测到" } else { "超时" });
+            })
+            .await;
+            debug!(
+                "[listen] 独立窗口弹出: {}",
+                if appeared { "已检测到" } else { "超时" }
+            );
             // 双击弹出独立窗口后, 主窗口状态已变, 重置 current_chat
             *self.current_chat.lock().await = None;
 
             // 4. 查找新弹出的独立窗口 — 轮询 (增加超时: 6000ms)
-            let wnd_node = wait_for_result(&self.atspi, &app, 6000, 200,
-                |atspi, app| {
-                    let atspi = atspi.clone();
-                    let app = app.clone();
-                    let who_owned = who.to_string();
-                    async move {
-                        let count = atspi.child_count(&app).await;
-                        for i in 0..count.min(20) {
-                            if let Some(child) = atspi.child_at(&app, i).await {
-                                let role = atspi.role(&child).await;
-                                let name = atspi.name(&child).await;
-                                if role == "frame" && name.contains(&who_owned) && !is_wechat_main(&name) {
-                                    return Some(child);
-                                }
+            let wnd_node = wait_for_result(&self.atspi, &app, 6000, 200, |atspi, app| {
+                let atspi = atspi.clone();
+                let app = app.clone();
+                let who_owned = who.to_string();
+                async move {
+                    let count = atspi.child_count(&app).await;
+                    for i in 0..count.min(20) {
+                        if let Some(child) = atspi.child_at(&app, i).await {
+                            let role = atspi.role(&child).await;
+                            let name = atspi.name(&child).await;
+                            if role == "frame"
+                                && name.contains(&who_owned)
+                                && !is_wechat_main(&name)
+                            {
+                                return Some(child);
                             }
                         }
-                        None
                     }
+                    None
                 }
-            ).await;
+            })
+            .await;
 
             if let Some(wnd_node) = wnd_node {
                 let mut chatwnd = ChatWnd::new(who.to_string(), self.atspi.clone(), wnd_node);
@@ -664,8 +806,15 @@ impl WeChat {
                 return Ok(true);
             }
 
-            warn!("[listen] 第 {} 次双击未弹出独立窗口, {}", attempt + 1,
-                if attempt < 2 { "将重试..." } else { "已达最大重试次数" });
+            warn!(
+                "[listen] 第 {} 次双击未弹出独立窗口, {}",
+                attempt + 1,
+                if attempt < 2 {
+                    "将重试..."
+                } else {
+                    "已达最大重试次数"
+                }
+            );
         }
 
         warn!("[listen] 添加监听失败 (3 次重试均未成功): {who}");
@@ -674,11 +823,13 @@ impl WeChat {
 
     /// 移除监听目标 — 关闭独立窗口 (X11 原生)
     pub async fn remove_listen(&self, engine: &InputEngine, who: &str) -> bool {
+        let was_target = self.listen_targets.lock().await.remove(who);
         let mut windows = self.listen_windows.lock().await;
-        if windows.remove(who).is_some() {
+        let had_window = windows.remove(who).is_some();
+        if had_window || was_target {
             info!("[listen] 移除监听: {who}");
             drop(windows); // 释放锁
-            // X11 原生关闭窗口
+                           // X11 原生关闭窗口
             match engine.close_window_by_title(who) {
                 Ok(true) => info!("[listen] 已关闭独立窗口: {who}"),
                 Ok(false) => info!("[listen] 未找到独立窗口 (可能已关闭): {who}"),
@@ -693,11 +844,10 @@ impl WeChat {
 
     /// 获取所有监听目标
     pub async fn get_listen_list(&self) -> Vec<String> {
-        let windows = self.listen_windows.lock().await;
-        windows.keys().cloned().collect()
+        let mut targets: Vec<String> = self.listen_targets.lock().await.iter().cloned().collect();
+        targets.sort();
+        targets
     }
-
-
 
     /// 查找独立聊天窗口
     ///
@@ -748,7 +898,6 @@ impl WeChat {
         None
     }
 
-
     // =================================================================
     // 发送消息 (增强版)
     // =================================================================
@@ -775,16 +924,15 @@ impl WeChat {
     ///
     /// 在 check_listen_window 返回 false 后调用,
     /// 如果该联系人之前在监听列表中, 自动重建独立窗口
-    pub async fn try_recover_listen_window(
-        &self, engine: &mut InputEngine, to: &str,
-    ) -> bool {
-        // 只在确实没有窗口时尝试恢复 (避免对从未监听的联系人重建)
+    pub async fn try_recover_listen_window(&self, engine: &mut InputEngine, to: &str) -> bool {
+        // 只恢复用户明确添加过的监听目标。普通发送不得自动弹出独立窗口。
+        if !self.listen_targets.lock().await.contains(to) {
+            return false;
+        }
         let has_window = self.listen_windows.lock().await.contains_key(to);
         if has_window {
             return true; // 窗口还在, 不需要恢复
         }
-        // 注意: 这里不检查 "之前是否监听过" — 如果窗口刚被 check_listen_window 移除,
-        // 说明之前确实在监听, 值得尝试恢复
         info!("[retry] 尝试自动恢复独立窗口: {to}");
         match self.add_listen(engine, to).await {
             Ok(true) => {
@@ -850,7 +998,9 @@ impl WeChat {
             return Ok((false, false, format!("未找到聊天: {to}")));
         }
 
-        let app = self.find_app().await
+        let app = self
+            .find_app()
+            .await
             .ok_or_else(|| anyhow::anyhow!("找不到微信应用"))?;
 
         // 输入 @ 列表
@@ -869,7 +1019,11 @@ impl WeChat {
             self.verify_sent(&app, text).await
         };
 
-        let msg = if verified { "消息已发送" } else { "消息已发送 (未验证)" };
+        let msg = if verified {
+            "消息已发送"
+        } else {
+            "消息已发送 (未验证)"
+        };
         info!("[ok] 完成: [{to}] verified={verified}");
         Ok((true, verified, msg.into()))
     }
@@ -906,6 +1060,57 @@ impl WeChat {
         Ok((true, false, "图片已发送".into()))
     }
 
+    /// 发送任意文件（仅传输，不执行）。
+    pub async fn send_file(
+        &self,
+        engine: &mut InputEngine,
+        to: &str,
+        file_path: &str,
+    ) -> Result<(bool, bool, String)> {
+        info!("[file] 开始发送文件: [{to}] → {file_path}");
+        // Always use the main window for generic files.  The independent chat
+        // toolbar geometry differs between WeChat releases and can select the
+        // wrong control; the main-window file chooser is the reliable path.
+        if !self.prepare_main_send(engine, to, false).await? {
+            return Ok((false, false, format!("未找到聊天: {to}")));
+        }
+        let app = self
+            .find_app()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("找不到微信应用"))?;
+        let deadline = tokio::time::Instant::now() + ms(3000);
+        let (file_x, file_y) = loop {
+            // Linux WeChat 4.1.x sometimes exposes the editor as a caret-sized
+            // AT-SPI text node.  The main frame remains stable: the file button
+            // is in the bottom toolbar after the fixed navigation/chat columns.
+            if let Some(frame) = self.main_window_bbox().await {
+                if frame.w >= 700 && frame.h >= 500 {
+                    break (frame.x + 403, frame.y + frame.h - 32);
+                }
+            }
+            // Compatibility fallback for releases that expose a full editor
+            // rectangle but name their top-level frame differently.
+            if let Some(edit) = self.find_edit_box(&app).await {
+                if let Some(bbox) = self.atspi.bbox(&edit).await {
+                    if bbox.w >= 120 && bbox.h >= 40 {
+                        break (bbox.x + 82, bbox.y + bbox.h - 18);
+                    }
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!("找不到可用的微信主窗口或消息输入框");
+            }
+            tokio::time::sleep(ms(100)).await;
+        };
+        engine.click(file_x, file_y).await?;
+        tokio::time::sleep(ms(500)).await;
+        engine.select_file_from_dialog(file_path).await?;
+        engine.press_enter().await?;
+        tokio::time::sleep(ms(700)).await;
+        info!("[ok] 文件发送完成: [{to}]");
+        Ok((true, false, "文件已发送".into()))
+    }
+
     /// 验证消息是否出现在消息列表末尾 (检查最后几条)
     async fn verify_sent(&self, app: &NodeRef, text: &str) -> bool {
         for attempt in 0..3 {
@@ -940,9 +1145,15 @@ fn is_wechat_main(name: &str) -> bool {
 /// 在输入框中逐个输入 @ 列表 (触发微信联系人选择器)
 ///
 /// 流程 (每人): 输入 "@" → 等待选择器弹出 → 粘贴名字搜索 → 回车选中
-async fn type_at_mentions(engine: &mut InputEngine, at: &[String], delay_ms: u64) -> anyhow::Result<()> {
+async fn type_at_mentions(
+    engine: &mut InputEngine,
+    at: &[String],
+    delay_ms: u64,
+) -> anyhow::Result<()> {
     for name in at {
-        if name.is_empty() { continue; }
+        if name.is_empty() {
+            continue;
+        }
         debug!("📢 输入 @: {name}");
         // 1. 键盘输入 "@" 字符触发联系人选择器 (必须用 type_text 而非 paste_text,
         //    因为微信只响应键盘事件触发选择器, 剪贴板粘贴不会触发)
@@ -958,14 +1169,19 @@ async fn type_at_mentions(engine: &mut InputEngine, at: &[String], delay_ms: u64
     Ok(())
 }
 
-
-
 /// 公共发送验证: 检查消息列表末尾是否包含指定文本
 ///
 /// 被 WeChat::verify_sent 和 ChatWnd::verify_sent 共用, 消除 copy-paste
-pub(crate) async fn verify_sent_in_list(atspi: &AtSpi, msg_list: &NodeRef, text: &str, attempt: i32) -> bool {
+pub(crate) async fn verify_sent_in_list(
+    atspi: &AtSpi,
+    msg_list: &NodeRef,
+    text: &str,
+    attempt: i32,
+) -> bool {
     let count = atspi.child_count(msg_list).await;
-    if count <= 0 { return false; }
+    if count <= 0 {
+        return false;
+    }
 
     let check_range = 3.min(count);
     for i in (count - check_range)..count {
@@ -993,8 +1209,10 @@ pub(crate) fn ms(n: u64) -> std::time::Duration {
 /// 最多等待 `max_ms` 毫秒, 每 `interval_ms` 检查一次
 /// 返回: 条件是否在超时前满足
 async fn wait_for<F, Fut>(
-    atspi: &Arc<AtSpi>, app: &NodeRef,
-    max_ms: u64, interval_ms: u64,
+    atspi: &Arc<AtSpi>,
+    app: &NodeRef,
+    max_ms: u64,
+    interval_ms: u64,
     check: F,
 ) -> bool
 where
@@ -1016,8 +1234,10 @@ where
 /// 最多等待 `max_ms` 毫秒, 每 `interval_ms` 检查一次
 /// 返回: 检查函数的结果 (Some = 成功, None = 超时)
 async fn wait_for_result<F, Fut, T>(
-    atspi: &Arc<AtSpi>, app: &NodeRef,
-    max_ms: u64, interval_ms: u64,
+    atspi: &Arc<AtSpi>,
+    app: &NodeRef,
+    max_ms: u64,
+    interval_ms: u64,
     check: F,
 ) -> Option<T>
 where

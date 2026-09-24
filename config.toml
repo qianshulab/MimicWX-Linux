@@ -3,16 +3,16 @@
 [api]
 # API 认证 Token (留空或不配置则不启用认证)
 # 请求方式: Header "Authorization: Bearer <token>" 或 Query "?token=<token>"
-token = "62811901aaAA"
+token = ""
 
 [listen]
 # 启动后自动弹出独立窗口并监听的对象
 # 填入联系人名称或群名称 (与微信显示名一致)
-# 示例: auto = ["NIUNIU","文件传输助手","zzz"]
-auto = ["NIUNIU","测试群","⁾Kuzumi¡小＾魔王（SP.","†phigrOS重度依赖†","爱丽丝爱玩滋崩"]
+# 示例: auto = ["文件传输助手", "好友A", "工作群"]
+auto = []
 
 [timing]
 # @ 输入流程中每步的等待时间 (毫秒)
 # 降低可加快速度, 但太低可能导致微信选择器来不及响应
 # 默认 300, 建议范围 150~500
-at_delay_ms = 0
+at_delay_ms = 300

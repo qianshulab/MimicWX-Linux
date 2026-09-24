@@ -6,7 +6,9 @@
 use anyhow::{Context, Result};
 use tracing::{debug, info};
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{self, ConnectionExt as _, Keycode, AtomEnum, ClientMessageEvent, EventMask};
+use x11rb::protocol::xproto::{
+    self, AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask, Keycode,
+};
 use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
 
@@ -86,7 +88,8 @@ impl InputEngine {
         let setup = conn.setup();
         let min_keycode = setup.min_keycode;
         let max_keycode = setup.max_keycode;
-        let reply = conn.get_keyboard_mapping(min_keycode, max_keycode - min_keycode + 1)?
+        let reply = conn
+            .get_keyboard_mapping(min_keycode, max_keycode - min_keycode + 1)?
             .reply()
             .context("获取键盘映射失败")?;
 
@@ -97,7 +100,10 @@ impl InputEngine {
         let atom_net_wm_name = conn.intern_atom(false, b"_NET_WM_NAME")?.reply()?.atom;
         let atom_utf8_string = conn.intern_atom(false, b"UTF8_STRING")?.reply()?.atom;
         let atom_net_client_list = conn.intern_atom(false, b"_NET_CLIENT_LIST")?.reply()?.atom;
-        let atom_net_active_window = conn.intern_atom(false, b"_NET_ACTIVE_WINDOW")?.reply()?.atom;
+        let atom_net_active_window = conn
+            .intern_atom(false, b"_NET_ACTIVE_WINDOW")?
+            .reply()?
+            .atom;
         let atom_net_close_window = conn.intern_atom(false, b"_NET_CLOSE_WINDOW")?.reply()?.atom;
         let atom_clipboard = conn.intern_atom(false, b"CLIPBOARD")?.reply()?.atom;
         let atom_targets = conn.intern_atom(false, b"TARGETS")?.reply()?.atom;
@@ -105,10 +111,19 @@ impl InputEngine {
         info!("[ok] X11 XTEST 就绪 (DISPLAY={display_env}, keycodes={min_keycode}~{max_keycode})");
 
         Ok(Self {
-            conn, screen_root, min_keycode, max_keycode, keysyms_per_keycode, keysyms,
-            atom_net_wm_name, atom_utf8_string, atom_net_client_list,
-            atom_net_active_window, atom_net_close_window,
-            atom_clipboard, atom_targets,
+            conn,
+            screen_root,
+            min_keycode,
+            max_keycode,
+            keysyms_per_keycode,
+            keysyms,
+            atom_net_wm_name,
+            atom_utf8_string,
+            atom_net_client_list,
+            atom_net_active_window,
+            atom_net_close_window,
+            atom_clipboard,
+            atom_targets,
         })
     }
 
@@ -174,13 +189,15 @@ impl InputEngine {
     // =================================================================
 
     fn raw_key_press(&self, keycode: Keycode) -> Result<()> {
-        self.conn.xtest_fake_input(KEY_PRESS, keycode, 0, self.screen_root, 0, 0, 0)?;
+        self.conn
+            .xtest_fake_input(KEY_PRESS, keycode, 0, self.screen_root, 0, 0, 0)?;
         self.conn.flush()?;
         Ok(())
     }
 
     fn raw_key_release(&self, keycode: Keycode) -> Result<()> {
-        self.conn.xtest_fake_input(KEY_RELEASE, keycode, 0, self.screen_root, 0, 0, 0)?;
+        self.conn
+            .xtest_fake_input(KEY_RELEASE, keycode, 0, self.screen_root, 0, 0, 0)?;
         self.conn.flush()?;
         Ok(())
     }
@@ -193,20 +210,27 @@ impl InputEngine {
     pub async fn press_key(&mut self, key_name: &str) -> Result<()> {
         let ks = Self::key_name_to_keysym(key_name)
             .ok_or_else(|| anyhow::anyhow!("未知按键: {key_name}"))?;
-        let (keycode, need_shift) = self.keysym_to_keycode(ks)
+        let (keycode, need_shift) = self
+            .keysym_to_keycode(ks)
             .ok_or_else(|| anyhow::anyhow!("按键无映射: {key_name}"))?;
 
         // Shift
         let shift_kc = if need_shift {
             self.keysym_to_keycode(keysym::XK_SHIFT_L).map(|(kc, _)| kc)
-        } else { None };
-        if let Some(skc) = shift_kc { self.raw_key_press(skc)?; }
+        } else {
+            None
+        };
+        if let Some(skc) = shift_kc {
+            self.raw_key_press(skc)?;
+        }
 
         self.raw_key_press(keycode)?;
         tokio::time::sleep(std::time::Duration::from_millis(KEY_HOLD_MS)).await;
         self.raw_key_release(keycode)?;
 
-        if let Some(skc) = shift_kc { self.raw_key_release(skc)?; }
+        if let Some(skc) = shift_kc {
+            self.raw_key_release(skc)?;
+        }
 
         debug!("[kbd] press_key: {key_name}");
         Ok(())
@@ -220,7 +244,8 @@ impl InputEngine {
         for part in &parts {
             let ks = Self::key_name_to_keysym(part.trim())
                 .ok_or_else(|| anyhow::anyhow!("未知按键: {part}"))?;
-            let (kc, _) = self.keysym_to_keycode(ks)
+            let (kc, _) = self
+                .keysym_to_keycode(ks)
                 .ok_or_else(|| anyhow::anyhow!("按键无映射: {part}"))?;
             keycodes.push(kc);
         }
@@ -244,19 +269,26 @@ impl InputEngine {
         for ch in text.chars() {
             let ks = Self::char_to_keysym(ch)
                 .ok_or_else(|| anyhow::anyhow!("字符无映射: '{ch}' — 请用 paste_text"))?;
-            let (keycode, need_shift) = self.keysym_to_keycode(ks)
+            let (keycode, need_shift) = self
+                .keysym_to_keycode(ks)
                 .ok_or_else(|| anyhow::anyhow!("字符无 keycode: '{ch}'"))?;
 
             let shift_kc = if need_shift {
                 self.keysym_to_keycode(keysym::XK_SHIFT_L).map(|(kc, _)| kc)
-            } else { None };
-            if let Some(skc) = shift_kc { self.raw_key_press(skc)?; }
+            } else {
+                None
+            };
+            if let Some(skc) = shift_kc {
+                self.raw_key_press(skc)?;
+            }
 
             self.raw_key_press(keycode)?;
             tokio::time::sleep(std::time::Duration::from_millis(KEY_HOLD_MS)).await;
             self.raw_key_release(keycode)?;
 
-            if let Some(skc) = shift_kc { self.raw_key_release(skc)?; }
+            if let Some(skc) = shift_kc {
+                self.raw_key_release(skc)?;
+            }
             tokio::time::sleep(std::time::Duration::from_millis(TYPING_DELAY_MS)).await;
         }
         Ok(())
@@ -286,12 +318,13 @@ impl InputEngine {
 
         let handle = tokio::task::spawn_blocking(move || -> Result<()> {
             use x11rb::connection::Connection;
-            use x11rb::wrapper::ConnectionExt as _;
             use x11rb::protocol::xproto::*;
             use x11rb::protocol::Event;
+            use x11rb::wrapper::ConnectionExt as _;
 
-            let (conn, screen_num) = x11rb::rust_connection::RustConnection::connect(Some(&display_env))
-                .context("X11 clipboard 连接失败")?;
+            let (conn, screen_num) =
+                x11rb::rust_connection::RustConnection::connect(Some(&display_env))
+                    .context("X11 clipboard 连接失败")?;
             let screen = &conn.setup().roots[screen_num];
 
             // 复用缓存的 Atom, 无需重新 intern
@@ -302,8 +335,14 @@ impl InputEngine {
             // 隐藏窗口作为 clipboard owner
             let win = conn.generate_id()?;
             conn.create_window(
-                0, win, screen.root,
-                0, 0, 1, 1, 0,
+                0,
+                win,
+                screen.root,
+                0,
+                0,
+                1,
+                1,
+                0,
                 WindowClass::INPUT_ONLY,
                 0,
                 &CreateWindowAux::new(),
@@ -341,42 +380,82 @@ impl InputEngine {
                             if req.target == targets_atom {
                                 let targets = [targets_atom, utf8_string, AtomEnum::STRING.into()];
                                 let _ = conn.change_property32(
-                                    PropMode::REPLACE, req.requestor, req.property,
-                                    AtomEnum::ATOM, &targets,
+                                    PropMode::REPLACE,
+                                    req.requestor,
+                                    req.property,
+                                    AtomEnum::ATOM,
+                                    &targets,
                                 );
                                 reply.property = req.property;
-                            } else if req.target == utf8_string || req.target == u32::from(AtomEnum::STRING) {
+                            } else if req.target == utf8_string
+                                || req.target == u32::from(AtomEnum::STRING)
+                            {
                                 let _ = conn.change_property8(
-                                    PropMode::REPLACE, req.requestor, req.property,
-                                    utf8_string, text_owned.as_bytes(),
+                                    PropMode::REPLACE,
+                                    req.requestor,
+                                    req.property,
+                                    utf8_string,
+                                    text_owned.as_bytes(),
                                 );
                                 reply.property = req.property;
                             }
 
-                            let _ = conn.send_event(false, req.requestor, EventMask::NO_EVENT, reply);
+                            let _ =
+                                conn.send_event(false, req.requestor, EventMask::NO_EVENT, reply);
                             let _ = conn.flush();
 
                             // UTF8 内容已提供,短暂等待后退出 (目标可能还会请求 TARGETS 等)
-                            if req.target == utf8_string || req.target == u32::from(AtomEnum::STRING) {
+                            if req.target == utf8_string
+                                || req.target == u32::from(AtomEnum::STRING)
+                            {
                                 // 多等 200ms 处理可能的后续请求 (如 SAVE_TARGETS)
-                                let extra_deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+                                let extra_deadline = std::time::Instant::now()
+                                    + std::time::Duration::from_millis(200);
                                 while std::time::Instant::now() < extra_deadline {
-                                    if let Ok(Some(Event::SelectionRequest(req2))) = conn.poll_for_event() {
+                                    if let Ok(Some(Event::SelectionRequest(req2))) =
+                                        conn.poll_for_event()
+                                    {
                                         let mut r2 = SelectionNotifyEvent {
-                                            response_type: 31, sequence: 0,
-                                            time: req2.time, requestor: req2.requestor,
-                                            selection: req2.selection, target: req2.target,
+                                            response_type: 31,
+                                            sequence: 0,
+                                            time: req2.time,
+                                            requestor: req2.requestor,
+                                            selection: req2.selection,
+                                            target: req2.target,
                                             property: 0u32.into(),
                                         };
                                         if req2.target == targets_atom {
-                                            let targets = [targets_atom, utf8_string, AtomEnum::STRING.into()];
-                                            let _ = conn.change_property32(PropMode::REPLACE, req2.requestor, req2.property, AtomEnum::ATOM, &targets);
+                                            let targets = [
+                                                targets_atom,
+                                                utf8_string,
+                                                AtomEnum::STRING.into(),
+                                            ];
+                                            let _ = conn.change_property32(
+                                                PropMode::REPLACE,
+                                                req2.requestor,
+                                                req2.property,
+                                                AtomEnum::ATOM,
+                                                &targets,
+                                            );
                                             r2.property = req2.property;
-                                        } else if req2.target == utf8_string || req2.target == u32::from(AtomEnum::STRING) {
-                                            let _ = conn.change_property8(PropMode::REPLACE, req2.requestor, req2.property, utf8_string, text_owned.as_bytes());
+                                        } else if req2.target == utf8_string
+                                            || req2.target == u32::from(AtomEnum::STRING)
+                                        {
+                                            let _ = conn.change_property8(
+                                                PropMode::REPLACE,
+                                                req2.requestor,
+                                                req2.property,
+                                                utf8_string,
+                                                text_owned.as_bytes(),
+                                            );
                                             r2.property = req2.property;
                                         }
-                                        let _ = conn.send_event(false, req2.requestor, EventMask::NO_EVENT, r2);
+                                        let _ = conn.send_event(
+                                            false,
+                                            req2.requestor,
+                                            EventMask::NO_EVENT,
+                                            r2,
+                                        );
                                         let _ = conn.flush();
                                     } else {
                                         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -447,13 +526,28 @@ impl InputEngine {
         Ok(())
     }
 
+    /// 在微信原生文件选择器中输入绝对路径并确认。
+    /// 文件只交给微信发送，不在本机执行。
+    pub async fn select_file_from_dialog(&mut self, file_path: &str) -> Result<()> {
+        info!("[file] 选择文件: {}", file_path);
+        let canonical = std::fs::canonicalize(file_path).context("发送文件不存在")?;
+        anyhow::ensure!(canonical.is_file(), "发送目标不是常规文件");
+        let path = canonical.to_str().context("发送文件路径不是有效 UTF-8")?;
+        self.paste_text(path).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        self.press_enter().await?;
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        Ok(())
+    }
+
     // =================================================================
     // 鼠标操作
     // =================================================================
 
     /// 鼠标移动到绝对坐标
     pub async fn move_mouse(&mut self, x: i32, y: i32) -> Result<()> {
-        self.conn.xtest_fake_input(MOTION_NOTIFY, 0, 0, self.screen_root, x as i16, y as i16, 0)?;
+        self.conn
+            .xtest_fake_input(MOTION_NOTIFY, 0, 0, self.screen_root, x as i16, y as i16, 0)?;
         self.conn.flush()?;
         debug!("[mouse] move_mouse: ({x}, {y})");
         Ok(())
@@ -465,12 +559,14 @@ impl InputEngine {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // 按下左键
-        self.conn.xtest_fake_input(BUTTON_PRESS, 1, 0, self.screen_root, 0, 0, 0)?;
+        self.conn
+            .xtest_fake_input(BUTTON_PRESS, 1, 0, self.screen_root, 0, 0, 0)?;
         self.conn.flush()?;
         tokio::time::sleep(std::time::Duration::from_millis(CLICK_HOLD_MS)).await;
 
         // 释放左键
-        self.conn.xtest_fake_input(BUTTON_RELEASE, 1, 0, self.screen_root, 0, 0, 0)?;
+        self.conn
+            .xtest_fake_input(BUTTON_RELEASE, 1, 0, self.screen_root, 0, 0, 0)?;
         self.conn.flush()?;
 
         debug!("[mouse] click: ({x}, {y})");
@@ -490,11 +586,13 @@ impl InputEngine {
         self.move_mouse(x, y).await?;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        self.conn.xtest_fake_input(BUTTON_PRESS, 3, 0, self.screen_root, 0, 0, 0)?;
+        self.conn
+            .xtest_fake_input(BUTTON_PRESS, 3, 0, self.screen_root, 0, 0, 0)?;
         self.conn.flush()?;
         tokio::time::sleep(std::time::Duration::from_millis(CLICK_HOLD_MS)).await;
 
-        self.conn.xtest_fake_input(BUTTON_RELEASE, 3, 0, self.screen_root, 0, 0, 0)?;
+        self.conn
+            .xtest_fake_input(BUTTON_RELEASE, 3, 0, self.screen_root, 0, 0, 0)?;
         self.conn.flush()?;
 
         debug!("[mouse] right_click: ({x}, {y})");
@@ -510,8 +608,10 @@ impl InputEngine {
 
         let button: u8 = if clicks > 0 { 4 } else { 5 };
         for _ in 0..clicks.unsigned_abs() {
-            self.conn.xtest_fake_input(BUTTON_PRESS, button, 0, self.screen_root, 0, 0, 0)?;
-            self.conn.xtest_fake_input(BUTTON_RELEASE, button, 0, self.screen_root, 0, 0, 0)?;
+            self.conn
+                .xtest_fake_input(BUTTON_PRESS, button, 0, self.screen_root, 0, 0, 0)?;
+            self.conn
+                .xtest_fake_input(BUTTON_RELEASE, button, 0, self.screen_root, 0, 0, 0)?;
             self.conn.flush()?;
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
@@ -535,12 +635,22 @@ impl InputEngine {
         let client_list_atom = self.atom_net_client_list;
 
         // 优先: _NET_CLIENT_LIST (WM 托管的所有顶层窗口)
-        let windows: Vec<u32> = if let Ok(reply) = self.conn.get_property(
-            false, self.screen_root, client_list_atom,
-            u32::from(AtomEnum::WINDOW), 0, 4096,
-        )?.reply() {
+        let windows: Vec<u32> = if let Ok(reply) = self
+            .conn
+            .get_property(
+                false,
+                self.screen_root,
+                client_list_atom,
+                u32::from(AtomEnum::WINDOW),
+                0,
+                4096,
+            )?
+            .reply()
+        {
             if reply.format == 32 && !reply.value.is_empty() {
-                reply.value.chunks_exact(4)
+                reply
+                    .value
+                    .chunks_exact(4)
                     .map(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                     .collect()
             } else {
@@ -555,13 +665,24 @@ impl InputEngine {
 
         for &win in &windows {
             // 尝试 _NET_WM_NAME (UTF-8), 回退 WM_NAME
-            let name = if let Ok(reply) = self.conn.get_property(
-                false, win, wm_name_atom, utf8_atom, 0, 1024,
-            )?.reply() {
+            let name = if let Ok(reply) = self
+                .conn
+                .get_property(false, win, wm_name_atom, utf8_atom, 0, 1024)?
+                .reply()
+            {
                 if reply.value.is_empty() {
-                    if let Ok(reply2) = self.conn.get_property(
-                        false, win, u32::from(AtomEnum::WM_NAME), u32::from(AtomEnum::STRING), 0, 1024,
-                    )?.reply() {
+                    if let Ok(reply2) = self
+                        .conn
+                        .get_property(
+                            false,
+                            win,
+                            u32::from(AtomEnum::WM_NAME),
+                            u32::from(AtomEnum::STRING),
+                            0,
+                            1024,
+                        )?
+                        .reply()
+                    {
                         String::from_utf8_lossy(&reply2.value).to_string()
                     } else {
                         continue;
@@ -573,7 +694,11 @@ impl InputEngine {
                 continue;
             };
 
-            let matched = if exact { name == title } else { name.contains(title) };
+            let matched = if exact {
+                name == title
+            } else {
+                name.contains(title)
+            };
             if matched {
                 found.push((win, name));
             }

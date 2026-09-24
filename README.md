@@ -1,8 +1,11 @@
 # MimicWX-Linux 🐧
 
-**零风险微信自动化框架** — 基于 AT-SPI2 无障碍接口 + X11 XTEST 输入注入 + SQLCipher 数据库解密
+**面向 AI 与自动化集成的微信双向数据桥** — 基于 AT-SPI2、X11 XTEST 与 WCDB 数据库解析
 
-> Zero-risk WeChat automation framework for Linux via AT-SPI2 accessibility + X11 XTEST input injection + SQLCipher database decryption
+> Bidirectional WeChat data bridge for Linux with structured messages, file transfer, conversation-aware replies, and REST/WebSocket APIs.
+
+> [!IMPORTANT]
+> 本项目通过桌面自动化和本地数据库解析与微信 Linux 客户端协作，并非微信官方 API。请仅在合法授权的账号、数据和网络环境中使用，并自行评估账号、隐私与平台规则风险。
 
 ---
 
@@ -10,10 +13,13 @@
 
 - 🔍 **数据库消息检测** — SQLCipher 解密 WCDB + fanotify WAL 实时监听，亚秒级延迟，支持文本/图片/语音/视频/文件/名片/位置/链接等 16+ 种消息类型结构化解析
 - ⌨️ **X11 原生输入注入** — XTEST 扩展注入键鼠事件 + X11 Selection 协议直接操作剪贴板（零外部进程依赖），原生窗口管理
-- 🔑 **自动密钥提取** — 进程内存扫描 + HMAC 验证，扫码登录后自动提取 32 字节 AES 密钥，支持密钥过期自动更新
+- 🧭 **明确的路由身份** — 每条消息同时提供稳定消息 ID、会话 ID、实际发送者 ID、群聊标记与收发方向
+- 📎 **安全附件通道** — 文档、压缩包、APK、EXE 等文件可受认证流式下载，支持断点续传；文件只按字节交付，不执行
+- ↩️ **双向回复与推送** — 可按会话发送文本/文件，也可按消息 ID 回复；群聊回复可自动 @ 原发送者
+- 🔑 **自动密钥提取** — 微信 4.0 保留内存扫描兼容路径；微信 4.1 自动捕获及持续监听登录口令、派生每库密钥并用 HMAC 验证，新增数据库与密钥轮换可热更新
 - 💬 **独立聊天窗口** — 借鉴 [wxauto](https://github.com/cluic/wxauto) 的 ChatWnd 设计，支持多窗口并行收发 + 缓存节点自动失效重建
-- 🔌 **REST + WebSocket API** — 完整 HTTP API + WebSocket 实时推送 (30s 心跳保活)，CORS 全开放，可对接 Yunzai 等机器人框架
-- 🐳 **Docker 一键部署** — 多阶段构建 + Xvfb/VNC 虚拟桌面，开箱即用
+- 🔌 **可靠的 REST + WebSocket API** — 多客户端独立游标、历史补拉、稳定 ID 去重和 30 秒心跳，适合 AI 知识库与工作流系统
+- 🐳 **Docker 一键部署** — 多阶段构建 + TigerVNC 虚拟桌面，开箱即用
 - 🔒 **Token 认证** — 支持 Bearer Token 认证保护 API 安全
 - 🖥️ **交互式控制台** — 支持 `/restart`、`/stop`、`/status`、`/refresh`、`/help` 命令，方向键切换历史
 - 💡 **自动弹性** — AT-SPI2 心跳自动重连、密钥过期自愈、独立窗口弹出重试、联系人定时刷新、优雅重启/关闭
@@ -26,7 +32,7 @@
 ┌─ Docker 容器 (Ubuntu 22.04) ──────────────────────────────────────────────┐
 │                                                                           │
 │  ┌─ 桌面环境 ────────────────────────────────────────────────────────────┐ │
-│  │  Xvfb (虚拟显示 :1)  ←→  TigerVNC  ←→  noVNC (浏览器远程桌面)      │ │
+│  │  TigerVNC X Server (:1)  ←→  noVNC (浏览器远程桌面)              │ │
 │  │  XFCE4 桌面  +  WeChat Linux 版                                     │ │
 │  └──────────────────────────────────────────────────────────────────────┘ │
 │                                                                           │
@@ -54,7 +60,7 @@
 │                                                                           │
 │  ┌─ 辅助脚本 ────────────────────────────────────────────────────────────┐ │
 │  │  start.sh:       容器启动编排 (D-Bus → VNC → AT-SPI2 → 微信 → 服务) │ │
-│  │  extract_key.py: GDB Python 脚本 — 自动提取 WCDB 加密密钥          │ │
+│  │  extract_key*.py: 内存兼容路径 + WCDB 口令捕获/派生/轮换监听       │ │
 │  └──────────────────────────────────────────────────────────────────────┘ │
 └───────────────────────────────────────────────────────────────────────────┘
 
@@ -80,9 +86,12 @@ MimicWX-Linux/
 ├── docker/
 │   ├── start.sh                # 容器启动脚本
 │   ├── extract_key.py          # GDB 密钥提取脚本
+│   ├── extract_key_compat.py   # 微信 4.1+ 口令捕获、逐库派生和 HMAC 校验
 │   └── dbus-mimicwx.conf       # D-Bus 配置 (允许 eavesdrop)
 ├── adapter/
 │   └── MimicWX.js              # Yunzai-Bot 适配器
+├── docs/                       # 中英文 API 与 NAS 部署文档
+├── vendor/wcdb-key-tool/       # 固定版本的 MIT 许可密钥工具
 ├── Cargo.toml                  # Rust 依赖 & 构建配置
 ├── Dockerfile                  # 多阶段构建 (builder + runtime)
 ├── docker-compose.yml          # 编排配置
@@ -164,8 +173,14 @@ SQLCipher 解密微信 WCDB 数据库 + fanotify 实时监听：
 | `/status` | GET | 服务状态 + DB/联系人/运行时间 (免认证) |
 | `/contacts` | GET | 联系人列表 (数据库) |
 | `/sessions` | GET | 会话列表 (优先数据库) |
-| `/messages/new` | GET | 新消息 (数据库增量) |
-| `/send` | POST | 发送文本消息 |
+| `/messages` | GET | 多客户端独立游标的实时消息缓存 |
+| `/messages/history` | GET | 从加密数据库补拉历史消息 |
+| `/messages/new` | GET | 旧版增量接口 (兼容保留) |
+| `/attachments/{id}` | GET | 受认证的附件流式下载/断点续传 |
+| `/messages/send` | POST | 按会话 ID/名称发送文本 |
+| `/messages/reply` | POST | 按消息 ID 回复原会话 |
+| `/messages/send-file` | POST | 发送 Base64 文件 (最大 100 MiB) |
+| `/send` | POST | 旧版文本发送接口 |
 | `/send_image` | POST | 发送图片 (base64) |
 | `/chat` | POST | 切换聊天目标 |
 | `/listen` | POST | 添加/查看监听目标 |
@@ -173,9 +188,9 @@ SQLCipher 解密微信 WCDB 数据库 + fanotify 实时监听：
 | `/command` | POST | 通用命令执行 (微信互通) |
 | `/ws` | GET | WebSocket 实时消息推送 |
 | `/debug/tree` | GET | AT-SPI2 控件树 (调试) |
-| `/debug/session_tree` | GET | 会话容器树 (调试) |
+| `/debug/sessions` | GET | 会话容器树 (调试) |
 
-> 认证方式: `Header "Authorization: Bearer <token>"` 或 `Query "?token=<token>"`
+> 完整字段、可靠消费流程、附件与回复示例见 [中文 API 文档](docs/API.zh-CN.md)；英文版见 [API.md](docs/API.md)。
 
 ---
 
@@ -187,33 +202,23 @@ SQLCipher 解密微信 WCDB 数据库 + fanotify 实时监听：
 - Docker + Docker Compose
 - 允许 `SYS_ADMIN` / `SYS_PTRACE` 能力 (密钥提取 + fanotify 需要)
 
-### 一键部署
+### NAS 推荐部署
 
 ```bash
-git clone https://github.com/PigeonCoders/MimicWX-Linux.git
+git clone https://github.com/aisuyi065/MimicWX-Linux.git
 cd MimicWX-Linux
-docker compose up -d
-```
-
-### 或手动 Docker 构建
-
-```bash
-docker build -t mimicwx .
-docker run -d --name mimicwx \
-  --cap-add SYS_ADMIN \
-  --cap-add SYS_PTRACE \
-  --security-opt seccomp=unconfined \
-  --security-opt apparmor=unconfined \
-  -p 5901:5901 \
-  -p 6080:6080 \
-  -p 8899:8899 \
-  --shm-size 512m \
-  mimicwx
+cp .env.example .env
+# 创建不纳入 Git 的运行配置，设置随机 API Token 和 VNC 密码
+cp config.toml config.local.toml
+mkdir -p data/xwechat data/xwechat_files secrets
+chmod 700 secrets
+chmod 600 config.local.toml secrets/vnc_password.txt
+docker compose -f compose.nas.yaml up -d --build
 ```
 
 ### 首次使用
 
-1. 打开 noVNC: `http://HOST:6080/vnc.html` (密码: `mimicwx`)
+1. 打开 noVNC: `http://HOST:6080/vnc.html`（密码来自 Docker secret）
 2. 在虚拟桌面中扫码登录微信
 3. GDB 自动提取数据库密钥 → MimicWX 自动启动
 4. 通过 API 接口开始使用
@@ -222,10 +227,11 @@ docker run -d --name mimicwx \
 
 | 服务 | 地址 | 说明 |
 |------|------|------|
-| noVNC | `http://HOST:6080/vnc.html` | 浏览器远程桌面 (密码: `mimicwx`) |
-| VNC | `vnc://HOST:5901` | VNC 客户端连接 |
+| noVNC | `http://HOST:6080/vnc.html` | 浏览器远程桌面 |
 | API | `http://HOST:8899` | REST API 接口 |
 | WebSocket | `ws://HOST:8899/ws` | 实时消息推送 |
+
+Intel N100 等 x86-64 NAS 的目录、安全、升级和回滚说明见 [NAS Docker 部署指南](docs/NAS_DEPLOYMENT.md)。
 
 ---
 
@@ -267,25 +273,9 @@ export MIMICWX_TOKEN="your-secret-token"         # 认证 Token
 
 ## 🔑 密钥提取原理
 
-```
-WeChat 进程启动
-      │
-      ▼
-extract_key.py (root 后台, start.sh 自动启动)
-      │
-      ├── 已有密钥? → HMAC 验证 → 有效 → 跳过提取 (秒退)
-      │                          → 无效 → 继续等待
-      ▼
-扫描 /proc/<PID>/maps + mem (无限等待用户扫码)
-      │
-      ▼
-提取 32 字节 AES 密钥 → HMAC 验证 → 保存至 wechat_key.txt + wechat_keys.json
-      │
-      ▼
-MimicWX 检测密钥文件 → 解密数据库 → 密钥过期时监控 mtime 自动重新初始化
-```
+微信 4.0 使用兼容的进程内存扫描路径；微信 4.1 在登录阶段通过 GDB 捕获 32 字节数据库口令，按每个数据库的 salt 执行 PBKDF2-SHA512 派生，并通过 page-1 HMAC 验证后才启用。后台派生监控会处理新出现的数据库，常驻登录监听器会捕获未来的口令轮换；密钥映射更新后，Rust 核心自动重建数据库连接，无需重启容器。实现使用固定版本并带许可证的 `wcdb-key-tool` 兼容代码，同时保留旧版本回退路径。
 
-> 💡 密钥提取基于进程内存扫描 + HMAC 验证，不依赖特定偏移量，微信版本升级无需更新。
+密钥材料仅保存在运行账号的私有持久化目录，不进入 Docker 镜像或 Git 仓库。微信内部实现发生变化时仍可能需要更新兼容逻辑，部署升级前应保留可回滚镜像。
 
 ---
 
@@ -402,6 +392,17 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data))
 ---
 
 ## 📋 更新日志
+
+### v0.6.0
+
+- 🤖 **AI 双向桥** — 实时接收、历史补拉、附件下载、会话回复与文件推送形成完整闭环
+- 🧭 **身份与去重** — 稳定 `message_id`，明确区分 `conversation_id` 与 `sender_id`
+- 📡 **可靠消费** — 多客户端独立游标、持久化数据库水位与重连补拉
+- 📎 **任意文件** — 文档/ZIP/APK/EXE 等文件受认证下载和发送，支持 Range
+- 🔑 **微信 4.1 自动密钥** — 口令捕获、逐库派生、HMAC 验证和新库自动更新
+- 🐳 **NAS 最佳实践** — 集中目录、绑定 LAN 地址、Docker secrets、日志轮转与回滚说明
+
+完整变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 ### v0.5.2
 

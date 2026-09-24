@@ -15,8 +15,11 @@
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
+use base64::Engine;
 use rusqlite::Connection;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -106,7 +109,12 @@ pub enum MsgContent {
     /// 表情包 (msg_type=47)
     Emoji { url: Option<String> },
     /// 链接/小程序 (msg_type=49, subtype != 6)
-    App { title: Option<String>, desc: Option<String>, url: Option<String>, app_type: Option<i32> },
+    App {
+        title: Option<String>,
+        desc: Option<String>,
+        url: Option<String>,
+        app_type: Option<i32>,
+    },
     /// 文件 (msg_type=49, subtype=6)
     File {
         title: Option<String>,
@@ -134,6 +142,35 @@ pub enum MsgContent {
     Unknown { raw: String, msg_type: i64 },
 }
 
+/// 可通过受认证 API 获取的本地附件。
+/// `id` 是只包含文件元数据的 URL-safe 定位符，不包含服务器路径。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AttachmentInfo {
+    pub id: String,
+    pub name: String,
+    pub size: Option<u64>,
+    pub extension: Option<String>,
+    pub md5: Option<String>,
+    pub available: bool,
+    pub download_url: String,
+}
+
+/// 已在微信数据目录中解析出的附件文件。
+#[derive(Debug, Clone)]
+pub struct ResolvedAttachment {
+    pub path: PathBuf,
+    pub name: String,
+    pub size: u64,
+    pub md5: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct AttachmentLocator {
+    name: String,
+    size: Option<u64>,
+    md5: Option<String>,
+}
+
 impl MsgContent {
     /// 消息类型的简短描述 (用于日志)
     pub fn type_label(&self) -> &'static str {
@@ -157,16 +194,19 @@ impl MsgContent {
         let text = match self {
             Self::Text { text } => text.clone(),
             Self::Image { .. } => "[图片]".into(),
-            Self::Voice { duration_ms, .. } => {
-                match duration_ms {
-                    Some(ms) if *ms >= 1000 => format!("[语音 {}s]", ms / 1000),
-                    Some(ms) if *ms > 0 => format!("[语音 {ms}ms]"),
-                    _ => "[语音]".into(),
-                }
-            }
+            Self::Voice { duration_ms, .. } => match duration_ms {
+                Some(ms) if *ms >= 1000 => format!("[语音 {}s]", ms / 1000),
+                Some(ms) if *ms > 0 => format!("[语音 {ms}ms]"),
+                _ => "[语音]".into(),
+            },
             Self::Video { .. } => "[视频]".into(),
             Self::Emoji { url, .. } => format!("[表情] {}", url.as_deref().unwrap_or("")),
-            Self::App { title, desc, app_type, .. } => {
+            Self::App {
+                title,
+                desc,
+                app_type,
+                ..
+            } => {
                 let t = title.as_deref().unwrap_or("");
                 let d = desc.as_deref().unwrap_or("");
                 let label = match app_type.unwrap_or(0) {
@@ -177,27 +217,45 @@ impl MsgContent {
                     2001 => "红包",
                     _ => "链接",
                 };
-                if !t.is_empty() { format!("[{label}] {t}") }
-                else if !d.is_empty() { format!("[{label}] {d}") }
-                else { format!("[{label}]") }
+                if !t.is_empty() {
+                    format!("[{label}] {t}")
+                } else if !d.is_empty() {
+                    format!("[{label}] {d}")
+                } else {
+                    format!("[{label}]")
+                }
             }
-            Self::File { title, file_size, .. } => {
+            Self::File {
+                title, file_size, ..
+            } => {
                 let t = title.as_deref().unwrap_or("未知文件");
                 match file_size {
-                    Some(s) if *s >= 1024 * 1024 => format!("[文件] {} ({:.1}MB)", t, *s as f64 / 1024.0 / 1024.0),
+                    Some(s) if *s >= 1024 * 1024 => {
+                        format!("[文件] {} ({:.1}MB)", t, *s as f64 / 1024.0 / 1024.0)
+                    }
                     Some(s) if *s >= 1024 => format!("[文件] {} ({:.1}KB)", t, *s as f64 / 1024.0),
                     Some(s) => format!("[文件] {} ({}B)", t, s),
                     None => format!("[文件] {}", t),
                 }
             }
-            Self::ContactCard { nickname, username, .. } => {
-                let name = nickname.as_deref()
+            Self::ContactCard {
+                nickname, username, ..
+            } => {
+                let name = nickname
+                    .as_deref()
                     .or(username.as_deref())
                     .unwrap_or("未知");
                 format!("[名片] {}", name)
             }
-            Self::Location { poiname, label, x, y, .. } => {
-                let name = poiname.as_deref()
+            Self::Location {
+                poiname,
+                label,
+                x,
+                y,
+                ..
+            } => {
+                let name = poiname
+                    .as_deref()
                     .or(label.as_deref())
                     .unwrap_or("未知位置");
                 if let (Some(lat), Some(lng)) = (x, y) {
@@ -220,6 +278,8 @@ impl MsgContent {
 /// 数据库消息
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DbMessage {
+    /// 跨接口使用的稳定消息标识（优先使用微信 server_id）。
+    pub message_id: String,
     pub local_id: i64,
     pub server_id: i64,
     pub create_time: i64,
@@ -242,6 +302,16 @@ pub struct DbMessage {
     pub is_at_me: bool,
     /// 被 @ 的 wxid 列表 (来自 source 列 <atuserlist>)
     pub at_user_list: Vec<String>,
+    /// 以下字段是语义明确的别名，保留原 chat/talker 字段以兼容旧客户端。
+    pub conversation_id: String,
+    pub conversation_name: String,
+    pub sender_id: String,
+    pub sender_name: String,
+    /// incoming / outgoing / system
+    pub direction: String,
+    pub is_group: bool,
+    /// 文件消息的下载元数据；非文件消息为 null。
+    pub attachment: Option<AttachmentInfo>,
 }
 
 /// 原始消息 (同步查询返回, 后续异步填充显示名)
@@ -269,6 +339,8 @@ struct TableMeta {
     table: String,
     /// 预编译的 SELECT SQL
     select_sql: String,
+    /// 无副作用历史查询：按时间升序返回，供知识库断线补拉。
+    history_sql: String,
     /// ID 列名 (local_id / rowid)
     id_col: String,
 }
@@ -289,9 +361,13 @@ pub struct DbManager {
     contacts: ArcSwap<HashMap<String, ContactInfo>>,
     /// 高水位线: "db_name::表名" → 最大 local_id (多数据库区分)
     watermarks: Mutex<HashMap<String, i64>>,
+    /// 仅保存表水位线，不保存明文消息；用于容器重启后的断点续传。
+    watermark_path: PathBuf,
     /// 持久化 message_N.db 连接池 (避免每次查询重做 PBKDF2 ~500ms)
     /// key = 相对路径 (如 "message/message_0.db")
     msg_conns: std::sync::Mutex<HashMap<String, Arc<std::sync::Mutex<Connection>>>>,
+    /// wechat_keys.json 最近修改时间；变化时使连接失效并按新密钥重开。
+    key_map_mtime: std::sync::Mutex<Option<std::time::SystemTime>>,
     /// 持久化 contact.db 连接 (避免每次重做 PBKDF2)
     contact_conn: Arc<std::sync::Mutex<Option<Connection>>>,
     /// 持久化 session.db 连接
@@ -308,23 +384,26 @@ pub struct DbManager {
 impl DbManager {
     /// 创建 DbManager
     pub fn new(key_hex: String, db_dir: PathBuf) -> Result<Self> {
-        let key_bytes = hex_to_bytes(&key_hex)
-            .context("密钥 hex 格式错误")?;
-        anyhow::ensure!(key_bytes.len() == 32 || key_bytes.len() == 48,
-            "密钥长度必须为 32 或 48 字节, 实际: {}", key_bytes.len());
+        let key_bytes = hex_to_bytes(&key_hex).context("密钥 hex 格式错误")?;
+        anyhow::ensure!(
+            key_bytes.len() == 32 || key_bytes.len() == 48,
+            "密钥长度必须为 32 或 48 字节, 实际: {}",
+            key_bytes.len()
+        );
 
         info!("[db] DbManager 初始化: db_dir={}", db_dir.display());
 
         // 从 db_dir 路径提取自己的 wxid
         // 路径格式: .../wxid_xxx_c024/db_storage
-        let self_wxid = db_dir.components()
+        let self_wxid = db_dir
+            .components()
             .filter_map(|c| c.as_os_str().to_str())
             .find(|s| s.starts_with("wxid_"))
             .map(|s| {
                 // 去掉目录名中的设备后缀 (如 _c024, _ac17 等)
                 // wxid 本体一般为 wxid_xxxx 格式, 后缀由微信附加
                 if let Some(pos) = s.rfind('_') {
-                    let suffix = &s[pos+1..];
+                    let suffix = &s[pos + 1..];
                     // 后缀较短 (≤6字符) 且不以 wxid 开头 → 视为设备后缀
                     if suffix.len() <= 6
                         && suffix.len() >= 2
@@ -369,6 +448,18 @@ impl DbManager {
             info!("📂 已连接 {} 个消息数据库", conns.len());
         }
 
+        let watermark_path = db_dir
+            .parent()
+            .unwrap_or(&db_dir)
+            .join(".mimicwx/watermarks.json");
+        let initial_watermarks = load_watermarks(&watermark_path);
+        if !initial_watermarks.is_empty() {
+            info!(
+                "[cursor] 已恢复 {} 个数据库水位线",
+                initial_watermarks.len()
+            );
+        }
+
         let (wal_tx, _) = tokio::sync::broadcast::channel::<()>(64);
         let (sent_tx, _) = tokio::sync::broadcast::channel::<String>(32);
         Ok(Self {
@@ -378,8 +469,10 @@ impl DbManager {
             self_wxid,
             self_display_name: tokio::sync::RwLock::new("我".to_string()),
             contacts: ArcSwap::from_pointee(HashMap::new()),
-            watermarks: Mutex::new(HashMap::new()),
+            watermarks: Mutex::new(initial_watermarks),
+            watermark_path,
             msg_conns: std::sync::Mutex::new(conns),
+            key_map_mtime: std::sync::Mutex::new(Self::key_map_mtime()),
             contact_conn: Arc::new(std::sync::Mutex::new(None)),
             session_conn: Arc::new(std::sync::Mutex::new(None)),
             table_meta_cache: std::sync::Mutex::new(HashMap::new()),
@@ -402,16 +495,23 @@ impl DbManager {
         }
         // 文件名匹配
         let basename = std::path::Path::new(db_name)
-            .file_name().and_then(|f| f.to_str()).unwrap_or("");
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("");
         for (k, v) in &map {
-            if k.ends_with(basename) { return Some(v.clone()); }
+            if k.ends_with(basename) {
+                return Some(v.clone());
+            }
         }
         None
     }
 
     /// 读取 wechat_keys.json (优先持久化路径, 回退 /tmp)
     fn read_keys_json() -> Option<std::collections::HashMap<String, String>> {
-        for path in &["/home/wechat/.xwechat/wechat_keys.json", "/tmp/wechat_keys.json"] {
+        for path in &[
+            "/home/wechat/.xwechat/wechat_keys.json",
+            "/tmp/wechat_keys.json",
+        ] {
             if let Ok(content) = std::fs::read_to_string(path) {
                 if let Ok(map) = serde_json::from_str(&content) {
                     return Some(map);
@@ -428,16 +528,29 @@ impl DbManager {
             None => return vec![],
         };
         let mut seen = std::collections::HashSet::new();
-        map.into_values().filter(|v| seen.insert(v.clone())).collect()
+        map.into_values()
+            .filter(|v| seen.insert(v.clone()))
+            .collect()
+    }
+
+    fn key_map_mtime() -> Option<std::time::SystemTime> {
+        std::fs::metadata("/home/wechat/.xwechat/wechat_keys.json")
+            .and_then(|metadata| metadata.modified())
+            .ok()
     }
 
     /// 用指定密钥尝试打开加密数据库
-    fn try_open_db_with_key(path: &Path, db_name: &str, key_hex: &str, key_bytes: &[u8]) -> Result<Connection> {
+    fn try_open_db_with_key(
+        path: &Path,
+        db_name: &str,
+        key_hex: &str,
+        key_bytes: &[u8],
+    ) -> Result<Connection> {
         let conn = Connection::open_with_flags(
             path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
-                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        ).with_context(|| format!("打开数据库失败: {}", path.display()))?;
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .with_context(|| format!("打开数据库失败: {}", path.display()))?;
 
         if key_bytes.len() == 48 {
             // 已派生密钥: PRAGMA key = "x'<96hex>'" 跳过 PBKDF2
@@ -462,16 +575,21 @@ impl DbManager {
         conn.execute_batch("PRAGMA query_only = ON;")?;
         conn.execute_batch(&format!("PRAGMA busy_timeout = {};", DB_BUSY_TIMEOUT_MS))?;
 
-        let count: i32 = conn.query_row(
-            "SELECT count(*) FROM sqlite_master", [], |row| row.get(0),
-        ).with_context(|| format!("数据库解密验证失败: {}", db_name))?;
+        let count: i32 = conn
+            .query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))
+            .with_context(|| format!("数据库解密验证失败: {}", db_name))?;
 
         trace!("🔓 {} 解密成功, {} 个表", db_name, count);
         Ok(conn)
     }
 
     /// 打开加密数据库 (只读模式, 自动尝试专属密钥 → 默认密钥 → 暴力匹配)
-    fn open_db(key_hex: &str, key_bytes: &[u8], db_dir: &Path, db_name: &str) -> Result<Connection> {
+    fn open_db(
+        key_hex: &str,
+        key_bytes: &[u8],
+        db_dir: &Path,
+        db_name: &str,
+    ) -> Result<Connection> {
         let path = db_dir.join(db_name);
         anyhow::ensure!(path.exists(), "数据库不存在: {}", path.display());
 
@@ -493,7 +611,9 @@ impl DbManager {
         //    (处理首次登录时 message_N.db 在密钥提取后才创建的场景)
         let all_keys = Self::all_json_keys();
         for candidate in &all_keys {
-            if candidate == key_hex { continue; } // 已尝试过
+            if candidate == key_hex {
+                continue;
+            } // 已尝试过
             let bytes = match hex_to_bytes(candidate) {
                 Ok(b) => b,
                 Err(_) => continue,
@@ -504,42 +624,80 @@ impl DbManager {
             }
         }
 
-        anyhow::bail!("数据库解密验证失败: {} (已尝试 {} 个密钥)", db_name, all_keys.len() + 1)
+        anyhow::bail!(
+            "数据库解密验证失败: {} (已尝试 {} 个密钥)",
+            db_name,
+            all_keys.len() + 1
+        )
     }
 
-    /// 确保至少有一个 message 数据库连接可用 (如为空则重新扫描)
-    fn ensure_msg_conns(&self) -> Result<std::sync::MutexGuard<'_, HashMap<String, Arc<std::sync::Mutex<Connection>>>>> {
-        let mut guard = self.msg_conns.lock().map_err(|e| anyhow::anyhow!("msg_conns lock poisoned: {}", e))?;
+    /// 确保所有 message 数据库均已连接，并在密钥映射更新时热重载。
+    fn ensure_msg_conns(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, HashMap<String, Arc<std::sync::Mutex<Connection>>>>> {
+        let mut guard = self
+            .msg_conns
+            .lock()
+            .map_err(|e| anyhow::anyhow!("msg_conns lock poisoned: {}", e))?;
+
+        let current_mtime = Self::key_map_mtime();
+        let mut known_mtime = self
+            .key_map_mtime
+            .lock()
+            .map_err(|e| anyhow::anyhow!("key_map_mtime lock poisoned: {e}"))?;
+        if current_mtime.is_some() && *known_mtime != current_mtime {
+            info!("[key] 检测到数据库密钥映射更新，重新建立数据库连接");
+            guard.clear();
+            if let Ok(mut contact) = self.contact_conn.lock() {
+                contact.take();
+            }
+            if let Ok(mut session) = self.session_conn.lock() {
+                session.take();
+            }
+            if let Ok(mut metadata) = self.table_meta_cache.lock() {
+                metadata.clear();
+            }
+            *known_mtime = current_mtime;
+        }
+        drop(known_mtime);
+
+        let count = self
+            .rescan_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if guard.is_empty() {
-            let count = self.rescan_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if count == 0 {
                 info!("[conn] 重新扫描 message 数据库...");
             } else {
                 debug!("[conn] 重新扫描 message 数据库... (第{}次)", count + 1);
             }
-            let msg_dir = self.db_dir.join("message");
-            if msg_dir.exists() {
-                if let Ok(entries) = std::fs::read_dir(&msg_dir) {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        if is_message_db(&name) {
-                            let rel_path = format!("message/{}", name);
-                            if !guard.contains_key(&rel_path) {
-                                if let Ok(conn) = Self::open_db(&self.key_hex, &self.key_bytes, &self.db_dir, &rel_path) {
-                                    info!("[conn] {} 持久连接已建立", name);
-                                    guard.insert(rel_path, Arc::new(std::sync::Mutex::new(conn)));
-                                }
-                            }
-                        }
+        }
+
+        // 即使已有连接也扫描目录，以便运行期间发现新建的 message_N.db。
+        let msg_dir = self.db_dir.join("message");
+        if let Ok(entries) = std::fs::read_dir(&msg_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !is_message_db(&name) {
+                    continue;
+                }
+                let rel_path = format!("message/{name}");
+                if guard.contains_key(&rel_path) {
+                    continue;
+                }
+                match Self::open_db(&self.key_hex, &self.key_bytes, &self.db_dir, &rel_path) {
+                    Ok(conn) => {
+                        info!("[conn] {name} 持久连接已建立");
+                        guard.insert(rel_path, Arc::new(std::sync::Mutex::new(conn)));
                     }
+                    Err(error) => debug!("[conn] {name} 暂不可用，将继续重试: {error}"),
                 }
             }
-            if !guard.is_empty() {
-                // 成功连接后重置计数器
-                self.rescan_count.store(0, std::sync::atomic::Ordering::Relaxed);
-            }
-            anyhow::ensure!(!guard.is_empty(), "无可用的 message 数据库");
         }
+        if !guard.is_empty() {
+            self.rescan_count
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        anyhow::ensure!(!guard.is_empty(), "无可用的 message 数据库");
         Ok(guard)
     }
 
@@ -556,39 +714,53 @@ impl DbManager {
 
         let contacts = tokio::task::spawn_blocking(move || -> Result<Vec<ContactInfo>> {
             // 复用或创建持久连接
-            let mut guard = conn_mutex.lock().map_err(|e| anyhow::anyhow!("contact_conn lock: {}", e))?;
+            let mut guard = conn_mutex
+                .lock()
+                .map_err(|e| anyhow::anyhow!("contact_conn lock: {}", e))?;
             if guard.is_none() {
-                *guard = Some(Self::open_db(&kh, &key, &dir, "contact/contact.db")?);  
+                *guard = Some(Self::open_db(&kh, &key, &dir, "contact/contact.db")?);
                 info!("[conn] contact.db 持久连接已建立");
             }
             let conn = guard.as_ref().unwrap();
-            let mut stmt = conn.prepare(
-                "SELECT username, nick_name, remark, alias FROM contact"
-            )?;
+            let mut stmt =
+                conn.prepare("SELECT username, nick_name, remark, alias FROM contact")?;
             // WCDB 压缩可能导致 TEXT 列实际存储为 BLOB (Zstd),
             // 必须用 BLOB 回退读取, 否则部分行 (包括 chatroom) 会被丢弃
-            let result: Vec<ContactInfo> = stmt.query_map([], |row| {
-                let username = wcdb_get_text(row, 0);
-                if username.is_empty() {
-                    return Err(rusqlite::Error::InvalidQuery);
-                }
-                let nick_name = wcdb_get_text(row, 1);
-                let remark = wcdb_get_text(row, 2);
-                let alias = wcdb_get_text(row, 3);
-                let display_name = if !remark.is_empty() {
-                    remark.clone()
-                } else if !nick_name.is_empty() {
-                    nick_name.clone()
-                } else {
-                    username.clone()
-                };
-                Ok(ContactInfo { username, nick_name, remark, alias, display_name })
-            })?.filter_map(|r| match r {
-                Ok(c) => Some(c),
-                Err(e) => { warn!("[warn] 联系人行读取失败: {}", e); None }
-            }).collect();
+            let result: Vec<ContactInfo> = stmt
+                .query_map([], |row| {
+                    let username = wcdb_get_text(row, 0);
+                    if username.is_empty() {
+                        return Err(rusqlite::Error::InvalidQuery);
+                    }
+                    let nick_name = wcdb_get_text(row, 1);
+                    let remark = wcdb_get_text(row, 2);
+                    let alias = wcdb_get_text(row, 3);
+                    let display_name = if !remark.is_empty() {
+                        remark.clone()
+                    } else if !nick_name.is_empty() {
+                        nick_name.clone()
+                    } else {
+                        username.clone()
+                    };
+                    Ok(ContactInfo {
+                        username,
+                        nick_name,
+                        remark,
+                        alias,
+                        display_name,
+                    })
+                })?
+                .filter_map(|r| match r {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        warn!("[warn] 联系人行读取失败: {}", e);
+                        None
+                    }
+                })
+                .collect();
             Ok(result)
-        }).await??;
+        })
+        .await??;
 
         let count = contacts.len();
         // 原子替换联系人快照 (无锁)
@@ -605,21 +777,25 @@ impl DbManager {
         let chatrooms = {
             let conn_mutex2 = Arc::clone(&self.contact_conn);
             tokio::task::spawn_blocking(move || -> Result<Vec<(String, String)>> {
-                let guard = conn_mutex2.lock().map_err(|e| anyhow::anyhow!("contact_conn lock: {}", e))?;
+                let guard = conn_mutex2
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("contact_conn lock: {}", e))?;
                 if let Some(conn) = guard.as_ref() {
                     let mut result = Vec::new();
                     if let Ok(mut stmt) = conn.prepare(
                         "SELECT cr.username, c.nick_name FROM chat_room cr \
                          LEFT JOIN contact c ON cr.username = c.username \
-                         WHERE cr.username IS NOT NULL"
+                         WHERE cr.username IS NOT NULL",
                     ) {
-                        let rows: Vec<(String, String)> = stmt.query_map([], |row| {
-                            let id = wcdb_get_text(row, 0);
-                            let name = wcdb_get_text(row, 1);
-                            Ok((id, name))
-                        }).ok()
-                        .map(|iter| iter.filter_map(|r| r.ok()).collect())
-                        .unwrap_or_default();
+                        let rows: Vec<(String, String)> = stmt
+                            .query_map([], |row| {
+                                let id = wcdb_get_text(row, 0);
+                                let name = wcdb_get_text(row, 1);
+                                Ok((id, name))
+                            })
+                            .ok()
+                            .map(|iter| iter.filter_map(|r| r.ok()).collect())
+                            .unwrap_or_default();
 
                         for (id, name) in rows {
                             if !id.is_empty() && !name.is_empty() {
@@ -632,7 +808,10 @@ impl DbManager {
                 } else {
                     Ok(vec![])
                 }
-            }).await.unwrap_or_else(|_| Ok(vec![])).unwrap_or_default()
+            })
+            .await
+            .unwrap_or_else(|_| Ok(vec![]))
+            .unwrap_or_default()
         };
 
         // 原子替换: 补充群名到快照
@@ -642,13 +821,16 @@ impl DbManager {
             let mut added = 0usize;
             for (chatroom_id, nick_name) in chatrooms {
                 if !new_map.contains_key(&chatroom_id) {
-                    new_map.insert(chatroom_id.clone(), ContactInfo {
-                        username: chatroom_id,
-                        nick_name: nick_name.clone(),
-                        remark: String::new(),
-                        alias: String::new(),
-                        display_name: nick_name,
-                    });
+                    new_map.insert(
+                        chatroom_id.clone(),
+                        ContactInfo {
+                            username: chatroom_id,
+                            nick_name: nick_name.clone(),
+                            remark: String::new(),
+                            alias: String::new(),
+                            display_name: nick_name,
+                        },
+                    );
                     added += 1;
                 }
             }
@@ -660,7 +842,9 @@ impl DbManager {
 
         // 尝试解析当前账号的显示名 (快照读取, 无锁)
         if !self.self_wxid.is_empty() {
-            let name = self.contacts.load()
+            let name = self
+                .contacts
+                .load()
                 .get(&self.self_wxid)
                 .map(|c| c.display_name.clone());
             if let Some(name) = name {
@@ -668,7 +852,6 @@ impl DbManager {
                 *self.self_display_name.write().await = name;
             }
         }
-
 
         Ok(count)
     }
@@ -680,7 +863,8 @@ impl DbManager {
 
     /// 通过 username 获取显示名
     async fn resolve_name(&self, username: &str) -> String {
-        self.contacts.load()
+        self.contacts
+            .load()
             .get(username)
             .map(|c| c.display_name.clone())
             .unwrap_or_else(|| username.to_string())
@@ -697,36 +881,49 @@ impl DbManager {
         let dir = self.db_dir.clone();
         let conn_mutex = Arc::clone(&self.session_conn);
 
-        let rows = tokio::task::spawn_blocking(move || -> Result<Vec<(String, i32, String, i64, String)>> {
-            // 复用或创建持久连接
-            let mut guard = conn_mutex.lock().map_err(|e| anyhow::anyhow!("session_conn lock: {}", e))?;
-            if guard.is_none() {
-                *guard = Some(Self::open_db(&kh, &key, &dir, "session/session.db")?);  
-                info!("[conn] session.db 持久连接已建立");
-            }
-            let conn = guard.as_ref().unwrap();
-            let mut stmt = conn.prepare(
-                "SELECT username, unread_count, summary, last_timestamp, last_msg_sender \
-                 FROM SessionTable ORDER BY sort_timestamp DESC"
-            )?;
-            let result = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<i32>>(1)?.unwrap_or(0),
-                    row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                    row.get::<_, Option<i64>>(3)?.unwrap_or(0),
-                    row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                ))
-            })?.filter_map(|r| r.ok()).collect();
-            Ok(result)
-        }).await??;
+        let rows = tokio::task::spawn_blocking(
+            move || -> Result<Vec<(String, i32, String, i64, String)>> {
+                // 复用或创建持久连接
+                let mut guard = conn_mutex
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("session_conn lock: {}", e))?;
+                if guard.is_none() {
+                    *guard = Some(Self::open_db(&kh, &key, &dir, "session/session.db")?);
+                    info!("[conn] session.db 持久连接已建立");
+                }
+                let conn = guard.as_ref().unwrap();
+                let mut stmt = conn.prepare(
+                    "SELECT username, unread_count, summary, last_timestamp, last_msg_sender \
+                 FROM SessionTable ORDER BY sort_timestamp DESC",
+                )?;
+                let result = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<i32>>(1)?.unwrap_or(0),
+                            row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                            row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                            row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                        ))
+                    })?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                Ok(result)
+            },
+        )
+        .await??;
 
         // 异步填充显示名
         let mut sessions = Vec::with_capacity(rows.len());
         for (username, unread_count, summary, last_timestamp, last_msg_sender) in rows {
             let display_name = self.resolve_name(&username).await;
             sessions.push(DbSessionInfo {
-                username, display_name, unread_count, summary, last_timestamp, last_msg_sender,
+                username,
+                display_name,
+                unread_count,
+                summary,
+                last_timestamp,
+                last_msg_sender,
             });
         }
         Ok(sessions)
@@ -736,6 +933,20 @@ impl DbManager {
     // 增量消息
     // =================================================================
 
+    pub async fn has_persisted_watermarks(&self) -> bool {
+        !self.watermarks.lock().await.is_empty()
+    }
+
+    async fn persist_watermarks(&self, watermarks: &HashMap<String, i64>) {
+        let path = self.watermark_path.clone();
+        let value = watermarks.clone();
+        match tokio::task::spawn_blocking(move || save_watermarks(&path, &value)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => warn!("[warn] 保存消息水位线失败: {error}"),
+            Err(error) => warn!("[warn] 保存消息水位线任务失败: {error}"),
+        }
+    }
+
     /// 获取新消息 (遍历所有 message_N.db 持久连接)
     pub async fn get_new_messages(&self) -> Result<Vec<DbMessage>> {
         let current_watermarks = self.watermarks.lock().await.clone();
@@ -743,7 +954,8 @@ impl DbManager {
         // 克隆 Arc 引用传入 spawn_blocking (安全, 无 unsafe)
         let conn_arcs: Vec<(String, Arc<std::sync::Mutex<Connection>>)> = {
             let conns_guard = self.ensure_msg_conns()?;
-            conns_guard.iter()
+            conns_guard
+                .iter()
                 .map(|(name, conn)| (name.clone(), Arc::clone(conn)))
                 .collect()
         };
@@ -751,7 +963,8 @@ impl DbManager {
         // 获取表结构缓存: key = "db_name::table_name" → TableMeta
         // 每次都查表列表 (1 条 SQL, 很快), 但只对新出现的表执行 PRAGMA
         let cached_meta: HashMap<String, TableMeta> = {
-            self.table_meta_cache.lock()
+            self.table_meta_cache
+                .lock()
                 .map(|g| g.clone())
                 .unwrap_or_default()
         };
@@ -799,7 +1012,7 @@ impl DbManager {
                             let local_id: i64 = row.get(0)?;
                             let svr_id: i64 = row.get::<_, Option<i64>>(1)?.unwrap_or(0);
                             let ts: i64 = row.get::<_, Option<i64>>(2)?.unwrap_or(0);
-                            
+
                             // message_content: 先尝试读为文本，失败则读 BLOB + Zstd 解压
                             let content = match row.get::<_, Option<String>>(3) {
                                 Ok(s) => s.unwrap_or_default(),
@@ -811,9 +1024,9 @@ impl DbManager {
                                     }
                                 }
                             };
-                            
+
                             let msg_type: i64 = row.get::<_, Option<i64>>(4)?.unwrap_or(0);
-                            
+
                             let sender = match row.get::<_, Option<String>>(5) {
                                 Ok(s) => s.unwrap_or_default(),
                                 Err(_) => match row.get::<_, Option<Vec<u8>>>(5) {
@@ -826,7 +1039,7 @@ impl DbManager {
 
                             // source 列: 消息元数据 XML (含 atuserlist 等)
                             let source = wcdb_get_text(row, 7);
-                            
+
                             Ok((local_id, svr_id, ts, content, msg_type, sender, status, source))
                         }) {
                         Ok(rows) => rows.filter_map(|r| match r {
@@ -861,14 +1074,154 @@ impl DbManager {
             }
         }
 
-
-
-        // 更新高水位线
-        if !raw_msgs.is_empty() {
-            *self.watermarks.lock().await = new_watermarks;
+        let result = self.hydrate_raw_messages(raw_msgs, true, true).await;
+        if !result.is_empty() {
+            *self.watermarks.lock().await = new_watermarks.clone();
+            self.persist_watermarks(&new_watermarks).await;
         }
+        Ok(result)
+    }
 
-        // 异步填充显示名 (批量: 一次锁定联系人缓存, 避免 N×2 次锁竞争)
+    /// 将显示名、备注名或 wxid 归一化为数据库会话 ID。
+    pub fn resolve_chat_identifier(&self, value: &str) -> String {
+        let contacts = self.contacts.load();
+        if contacts.contains_key(value) {
+            return value.to_string();
+        }
+        contacts
+            .values()
+            .find(|contact| {
+                contact.display_name == value
+                    || contact.remark == value
+                    || contact.nick_name == value
+                    || contact.alias == value
+            })
+            .map(|contact| contact.username.clone())
+            .unwrap_or_else(|| value.to_string())
+    }
+
+    /// 将会话 ID 转为微信 UI 可搜索的显示名；已是显示名时原样返回。
+    pub fn conversation_display_name(&self, value: &str) -> String {
+        self.contacts
+            .load()
+            .get(value)
+            .map(|contact| contact.display_name.clone())
+            .unwrap_or_else(|| value.to_string())
+    }
+
+    /// 无副作用查询历史消息，供知识库断线后按时间和会话补拉。
+    /// 不读取或修改实时监听水位线。
+    pub async fn get_message_history(
+        &self,
+        chat: Option<&str>,
+        since_time: i64,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<DbMessage>, bool)> {
+        let wanted_chat = chat.map(|value| self.resolve_chat_identifier(value));
+        let limit = limit.clamp(1, 500);
+        let offset = offset.min(100_000);
+        // Each table contributes its oldest candidates.  Fetching offset + page
+        // size from every table guarantees the globally merged page is present.
+        let fetch_limit = offset.saturating_add(limit).saturating_add(1);
+        let conn_arcs: Vec<(String, Arc<std::sync::Mutex<Connection>>)> = {
+            let conns_guard = self.ensure_msg_conns()?;
+            conns_guard
+                .iter()
+                .map(|(name, conn)| (name.clone(), Arc::clone(conn)))
+                .collect()
+        };
+        let cached_meta = self
+            .table_meta_cache
+            .lock()
+            .map(|cache| cache.clone())
+            .unwrap_or_default();
+
+        let (raw_msgs, updated_meta) = tokio::task::spawn_blocking(
+            move || -> Result<(Vec<RawMsg>, HashMap<String, TableMeta>)> {
+                let mut all_msgs = Vec::new();
+                let mut meta_cache = cached_meta;
+                let mut name2id_cache = HashMap::new();
+                for (db_name, conn_arc) in &conn_arcs {
+                    let conn = conn_arc
+                        .lock()
+                        .map_err(|e| anyhow::anyhow!("conn lock: {e}"))?;
+                    for table in discover_msg_tables(&conn) {
+                        let chat_id = resolve_chat_from_table(&table, &conn, &mut name2id_cache);
+                        if chat_id.is_empty()
+                            || wanted_chat
+                                .as_ref()
+                                .is_some_and(|wanted| wanted != &chat_id)
+                        {
+                            continue;
+                        }
+                        let cache_key = format!("{db_name}::{table}");
+                        let meta = if let Some(meta) = meta_cache.get(&cache_key) {
+                            meta.clone()
+                        } else if let Some(meta) = build_single_table_meta(&conn, &table) {
+                            meta_cache.insert(cache_key, meta.clone());
+                            meta
+                        } else {
+                            continue;
+                        };
+                        let mut stmt = match conn.prepare(&meta.history_sql) {
+                            Ok(stmt) => stmt,
+                            Err(error) => {
+                                warn!("[warn] 历史查询 {} ({}) 失败: {}", table, db_name, error);
+                                continue;
+                            }
+                        };
+                        let rows = stmt.query_map(
+                            rusqlite::params![since_time, fetch_limit as i64],
+                            |row| {
+                                Ok(RawMsg {
+                                    local_id: row.get(0)?,
+                                    server_id: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                                    create_time: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                                    content: wcdb_get_text(row, 3),
+                                    msg_type: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                                    talker: wcdb_get_text(row, 5),
+                                    chat: chat_id.clone(),
+                                    status: row.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                                    source: wcdb_get_text(row, 7),
+                                })
+                            },
+                        );
+                        match rows {
+                            Ok(rows) => all_msgs.extend(rows.filter_map(|row| row.ok())),
+                            Err(error) => {
+                                warn!("[warn] 历史查询 {} ({}) 失败: {}", table, db_name, error)
+                            }
+                        }
+                    }
+                }
+                Ok((all_msgs, meta_cache))
+            },
+        )
+        .await??;
+
+        if let Ok(mut cache) = self.table_meta_cache.lock() {
+            for (key, value) in updated_meta {
+                cache.entry(key).or_insert(value);
+            }
+        }
+        let mut messages = self.hydrate_raw_messages(raw_msgs, false, false).await;
+        let mut seen = HashSet::new();
+        messages.retain(|message| seen.insert(message.message_id.clone()));
+        messages.sort_by(|a, b| {
+            (a.create_time, a.message_id.as_str()).cmp(&(b.create_time, b.message_id.as_str()))
+        });
+        let has_more = messages.len() > offset.saturating_add(limit);
+        let page = messages.into_iter().skip(offset).take(limit).collect();
+        Ok((page, has_more))
+    }
+
+    async fn hydrate_raw_messages(
+        &self,
+        raw_msgs: Vec<RawMsg>,
+        broadcast_sent: bool,
+        log_messages: bool,
+    ) -> Vec<DbMessage> {
         let contacts_cache = self.contacts.load();
         let self_display = self.self_display_name.read().await.clone();
         let resolve = |username: &str| -> String {
@@ -883,28 +1236,19 @@ impl DbManager {
             let mut talker = m.talker;
             let mut content = m.content;
 
-            // 群聊中 real_sender_id 可能为空, 此时发送人 wxid 嵌入在消息内容中
-            // 格式: "wxid_xxx:\n实际消息" 或 "wxid_xxx:\r\n实际消息"
             if talker.is_empty() && m.chat.contains("@chatroom") {
                 if let Some(pos) = content.find(":\n") {
                     let prefix = &content[..pos];
-                    // 验证前缀看起来像 wxid (不含空格和特殊字符)
                     if !prefix.is_empty() && !prefix.contains(' ') && prefix.len() < 50 {
                         talker = prefix.to_string();
-                        content = content[pos + 2..].to_string(); // 跳过 ":\n"
+                        content = content[pos + 2..].to_string();
                     }
                 }
             }
 
-            // 判断是否为自己发送的消息 (基于 status 位掩码)
-            // status bit 1 (0x02): 1=收到的消息, 0=自己发的消息
-            // 注意: 系统消息 (10000/10002) 的 status 可能也为 0, 需排除
             let base_msg_type = (m.msg_type & 0xFFFF) as i32;
-            let is_self = (m.status & 0x02) == 0
-                && base_msg_type != 10000
-                && base_msg_type != 10002;
-
-            // talker 为空时填充: 自发用 self_wxid, 私聊收到用 chat(对方)
+            let is_self =
+                (m.status & 0x02) == 0 && base_msg_type != 10000 && base_msg_type != 10002;
             if talker.is_empty() {
                 if is_self {
                     talker = self.self_wxid.clone();
@@ -919,63 +1263,85 @@ impl DbManager {
                 resolve(&talker)
             };
             let chat_display = resolve(&m.chat);
-            // 非文本消息: 输出原始 content 前 200 字符用于调试 XML 解析
-            let base_type = (m.msg_type & 0xFFFF) as i32;
-            if base_type != 1 {
+            if log_messages && base_msg_type != 1 {
                 let raw_preview = if content.len() > 200 {
                     format!("{}...", &content[..content.floor_char_boundary(200)])
                 } else {
                     content.clone()
                 };
-                debug!("🔍 msg_type={} (base={}) raw: {}", m.msg_type, base_type, raw_preview);
+                debug!(
+                    "🔍 msg_type={} (base={}) raw: {}",
+                    m.msg_type, base_msg_type, raw_preview
+                );
             }
             let parsed = parse_msg_content(m.msg_type, &content);
-
-            // 解析 @ 列表: 从 source 列的 <atuserlist> 提取被 @ 者的 wxid
             let at_user_list: Vec<String> = extract_xml_text(&m.source, "atuserlist")
-                .map(|s| s.split(',')
-                    .map(|w| w.trim().to_string())
-                    .filter(|w| !w.is_empty())
-                    .collect())
+                .map(|s| {
+                    s.split(',')
+                        .map(|w| w.trim().to_string())
+                        .filter(|w| !w.is_empty())
+                        .collect()
+                })
                 .unwrap_or_default();
-            let is_at_me = !self.self_wxid.is_empty()
-                && at_user_list.iter().any(|w| w == &self.self_wxid);
+            let is_at_me =
+                !self.self_wxid.is_empty() && at_user_list.iter().any(|w| w == &self.self_wxid);
+            let is_group = m.chat.contains("@chatroom");
+            let direction = if matches!(&parsed, MsgContent::System { .. }) {
+                "system"
+            } else if is_self {
+                "outgoing"
+            } else {
+                "incoming"
+            }
+            .to_string();
+            let message_id = stable_message_id(m.server_id, &m.chat, m.local_id, m.create_time);
+            let attachment = self.attachment_info(&parsed);
 
             result.push(DbMessage {
+                message_id,
                 local_id: m.local_id,
                 server_id: m.server_id,
                 create_time: m.create_time,
                 content: content.clone(),
                 parsed,
                 msg_type: m.msg_type,
-                talker,
-                talker_display_name: talker_display,
-                chat: m.chat,
-                chat_display_name: chat_display,
+                talker: talker.clone(),
+                talker_display_name: talker_display.clone(),
+                chat: m.chat.clone(),
+                chat_display_name: chat_display.clone(),
                 is_self,
                 is_at_me,
                 at_user_list,
+                conversation_id: m.chat,
+                conversation_name: chat_display,
+                sender_id: talker,
+                sender_name: talker_display,
+                direction,
+                is_group,
+                attachment,
             });
 
-            // 自发消息广播: 通知 verify_sent 等待者
-            if is_self {
+            if broadcast_sent && is_self {
                 let _ = self.sent_content_tx.send(content);
             }
         }
-        drop(contacts_cache); // 显式释放锁
+        drop(contacts_cache);
 
-        for m in &result {
-            let preview = m.parsed.preview(40);
-            let icon = if m.is_self { "[send] →" } else { "" };
-            if m.chat.contains("@chatroom") {
-                info!("{icon} [{}] {}({}): {}",
-                    m.chat_display_name, m.talker_display_name, m.talker, preview);
-            } else {
-                info!("{icon} {}({}): {}",
-                    m.chat_display_name, m.talker, preview);
+        if log_messages {
+            for m in &result {
+                let preview = m.parsed.preview(40);
+                let icon = if m.is_self { "[send] →" } else { "" };
+                if m.chat.contains("@chatroom") {
+                    info!(
+                        "{icon} [{}] {}({}): {}",
+                        m.chat_display_name, m.talker_display_name, m.talker, preview
+                    );
+                } else {
+                    info!("{icon} {}({}): {}", m.chat_display_name, m.talker, preview);
+                }
             }
         }
-        Ok(result)
+        result
     }
 
     /// 标记所有已有消息为已读 (复用持久连接 + 复用表元数据构建)
@@ -983,7 +1349,8 @@ impl DbManager {
         // 克隆 Arc 引用传入 spawn_blocking
         let conn_arcs: Vec<(String, Arc<std::sync::Mutex<Connection>>)> = {
             let conns_guard = self.ensure_msg_conns()?;
-            conns_guard.iter()
+            conns_guard
+                .iter()
                 .map(|(name, conn)| (name.clone(), Arc::clone(conn)))
                 .collect()
         };
@@ -993,8 +1360,12 @@ impl DbManager {
             let mut total_tables = 0;
 
             for (db_name, conn_arc) in &conn_arcs {
-                let conn = conn_arc.lock().map_err(|e| anyhow::anyhow!("conn lock: {}", e))?;
-                let db_prefix = db_name.trim_start_matches("message/").trim_end_matches(".db");
+                let conn = conn_arc
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("conn lock: {}", e))?;
+                let db_prefix = db_name
+                    .trim_start_matches("message/")
+                    .trim_end_matches(".db");
 
                 // 复用 discover_msg_tables + build_single_table_meta (消除重复 PRAGMA)
                 let tables = discover_msg_tables(&conn);
@@ -1002,7 +1373,9 @@ impl DbManager {
                     if let Some(meta) = build_single_table_meta(&conn, table) {
                         let wm_key = format!("{}::{}", db_prefix, table);
                         let sql = format!("SELECT MAX({}) FROM [{}]", meta.id_col, table);
-                        if let Ok(max_id) = conn.query_row(&sql, [], |row| row.get::<_, Option<i64>>(0)) {
+                        if let Ok(max_id) =
+                            conn.query_row(&sql, [], |row| row.get::<_, Option<i64>>(0))
+                        {
                             if let Some(id) = max_id {
                                 watermarks.insert(wm_key, id);
                             }
@@ -1011,11 +1384,17 @@ impl DbManager {
                 }
                 total_tables += tables.len();
             }
-            info!("[ok] 已标记 {} 个消息表为已读 (跨 {} 个数据库)", total_tables, conn_arcs.len());
+            info!(
+                "[ok] 已标记 {} 个消息表为已读 (跨 {} 个数据库)",
+                total_tables,
+                conn_arcs.len()
+            );
             Ok(watermarks)
-        }).await??;
+        })
+        .await??;
 
-        *self.watermarks.lock().await = wm;
+        *self.watermarks.lock().await = wm.clone();
+        self.persist_watermarks(&wm).await;
         Ok(())
     }
 
@@ -1029,7 +1408,11 @@ impl DbManager {
     /// 无需单独查询 DB, 完全复用现有的消息检测流程.
     /// 调用方应在发送前调用 subscribe_sent() 获取 receiver, 避免竞态.
     /// 超时 5 秒兜底.
-    pub async fn verify_sent(&self, text: &str, mut sent_rx: tokio::sync::broadcast::Receiver<String>) -> Result<bool> {
+    pub async fn verify_sent(
+        &self,
+        text: &str,
+        mut sent_rx: tokio::sync::broadcast::Receiver<String>,
+    ) -> Result<bool> {
         let text_owned = text.to_string();
 
         let deadline = tokio::time::Instant::now() + SEND_VERIFY_TIMEOUT;
@@ -1073,6 +1456,57 @@ impl DbManager {
         self.wal_notify.subscribe()
     }
 
+    /// 将文件消息转换为无服务器路径泄漏的下载定位符。
+    fn attachment_info(&self, parsed: &MsgContent) -> Option<AttachmentInfo> {
+        let MsgContent::File {
+            title,
+            file_size,
+            file_ext,
+            md5,
+        } = parsed
+        else {
+            return None;
+        };
+        let name = title.as_deref()?.trim();
+        if !valid_attachment_name(name) {
+            return None;
+        }
+        let locator = AttachmentLocator {
+            name: name.to_string(),
+            size: *file_size,
+            md5: normalize_md5(md5.as_deref()),
+        };
+        let encoded = serde_json::to_vec(&locator)
+            .ok()
+            .map(|raw| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw))?;
+        let available = resolve_attachment_sync(&self.db_dir, &locator).is_ok();
+        Some(AttachmentInfo {
+            id: encoded.clone(),
+            name: locator.name,
+            size: locator.size,
+            extension: file_ext.clone(),
+            md5: locator.md5,
+            available,
+            download_url: format!("/attachments/{encoded}"),
+        })
+    }
+
+    /// 在当前账号的微信附件目录内解析附件。只返回常规文件，禁止越目录和符号链接。
+    pub async fn resolve_attachment(&self, id: &str) -> Result<ResolvedAttachment> {
+        anyhow::ensure!(id.len() <= 2048, "附件标识过长");
+        let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(id)
+            .context("附件标识格式错误")?;
+        let locator: AttachmentLocator =
+            serde_json::from_slice(&raw).context("附件标识内容错误")?;
+        anyhow::ensure!(valid_attachment_name(&locator.name), "附件文件名无效");
+        if let Some(ref digest) = locator.md5 {
+            anyhow::ensure!(normalize_md5(Some(digest)).is_some(), "附件 MD5 无效");
+        }
+        let db_dir = self.db_dir.clone();
+        tokio::task::spawn_blocking(move || resolve_attachment_sync(&db_dir, &locator)).await?
+    }
+
     // =================================================================
     // WAL fanotify 监听 (PID 过滤)
     // =================================================================
@@ -1099,10 +1533,192 @@ impl DbManager {
 // 同步辅助函数
 // =====================================================================
 
+fn load_watermarks(path: &Path) -> HashMap<String, i64> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+fn save_watermarks(path: &Path, watermarks: &HashMap<String, i64>) -> Result<()> {
+    let parent = path.parent().context("水位线目录无效")?;
+    std::fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(".watermarks.{}.tmp", std::process::id()));
+    let content = serde_json::to_vec_pretty(watermarks)?;
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&temporary)?;
+        file.write_all(&content)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(&temporary, path)?;
+    Ok(())
+}
+
+fn stable_message_id(server_id: i64, chat: &str, local_id: i64, create_time: i64) -> String {
+    if server_id > 0 {
+        return format!("wx:{server_id}");
+    }
+    let digest = md5::compute(format!("{chat}\0{local_id}\0{create_time}"));
+    format!("local:{digest:x}")
+}
+
+fn valid_attachment_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 255
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.chars().any(char::is_control)
+        && Path::new(name).file_name() == Some(OsStr::new(name))
+}
+
+fn normalize_md5(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    if value.len() == 32 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(value.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+fn attachment_roots(db_dir: &Path) -> Vec<PathBuf> {
+    let Some(account_root) = db_dir.parent() else {
+        return Vec::new();
+    };
+    ["msg/file", "msg/attach", "msg/video", "temp"]
+        .into_iter()
+        .map(|relative| account_root.join(relative))
+        .filter(|path| path.is_dir())
+        .collect()
+}
+
+fn collect_regular_files(root: &Path, depth: usize, output: &mut Vec<PathBuf>) {
+    if depth > 8 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            collect_regular_files(&entry.path(), depth + 1, output);
+        } else if file_type.is_file() {
+            output.push(entry.path());
+        }
+    }
+}
+
+fn file_md5(path: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut context = md5::Context::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        context.consume(&buffer[..read]);
+    }
+    Ok(format!("{:x}", context.compute()))
+}
+
+fn resolve_attachment_sync(
+    db_dir: &Path,
+    locator: &AttachmentLocator,
+) -> Result<ResolvedAttachment> {
+    anyhow::ensure!(valid_attachment_name(&locator.name), "附件文件名无效");
+    let roots = attachment_roots(db_dir);
+    anyhow::ensure!(!roots.is_empty(), "微信附件目录不存在");
+
+    let mut candidates = Vec::new();
+    for root in &roots {
+        collect_regular_files(root, 0, &mut candidates);
+    }
+
+    let target_md5 = normalize_md5(locator.md5.as_deref());
+    let mut matched: Vec<(bool, std::time::SystemTime, PathBuf, u64, Option<String>)> = Vec::new();
+    for candidate in candidates {
+        let exact_name = candidate.file_name() == Some(OsStr::new(&locator.name));
+        if !exact_name && target_md5.is_none() {
+            continue;
+        }
+        let Ok(metadata) = candidate.metadata() else {
+            continue;
+        };
+        if !metadata.is_file()
+            || locator
+                .size
+                .is_some_and(|expected| expected != metadata.len())
+        {
+            continue;
+        }
+
+        let digest = if let Some(ref expected) = target_md5 {
+            let Ok(actual) = file_md5(&candidate) else {
+                continue;
+            };
+            if &actual != expected {
+                continue;
+            }
+            Some(actual)
+        } else {
+            None
+        };
+
+        // canonicalize 后再次确认文件仍在白名单根目录中。
+        let Ok(canonical) = candidate.canonicalize() else {
+            continue;
+        };
+        let allowed = roots
+            .iter()
+            .filter_map(|root| root.canonicalize().ok())
+            .any(|root| canonical.starts_with(root));
+        if !allowed {
+            continue;
+        }
+        matched.push((
+            exact_name,
+            metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+            canonical,
+            metadata.len(),
+            digest,
+        ));
+    }
+
+    matched.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    let Some((_exact, _mtime, path, size, digest)) = matched.into_iter().next() else {
+        anyhow::bail!("附件尚未下载到微信本地目录")
+    };
+    Ok(ResolvedAttachment {
+        path,
+        name: locator.name.clone(),
+        size,
+        md5: digest.or(target_md5),
+    })
+}
+
 /// 从消息表名解析会话 username
 /// ChatMsg_<rowid> -> Name2Id.user_name WHERE rowid = <id>
 /// Msg_<hash> -> MD5(Name2Id.user_name) == hash (使用缓存 O(1) 查找)
-fn resolve_chat_from_table(table_name: &str, conn: &Connection, cache: &mut HashMap<String, String>) -> String {
+fn resolve_chat_from_table(
+    table_name: &str,
+    conn: &Connection,
+    cache: &mut HashMap<String, String>,
+) -> String {
     // 尝试 ChatMsg_<数字> 格式 -> 按 rowid 查找
     if let Some(suffix) = table_name.strip_prefix("ChatMsg_") {
         if let Ok(id) = suffix.parse::<i64>() {
@@ -1115,7 +1731,8 @@ fn resolve_chat_from_table(table_name: &str, conn: &Connection, cache: &mut Hash
     }
 
     // 尝试 Msg_<hash> / MSG_<hash> / Chat_<hash> 格式
-    if let Some(hash) = table_name.strip_prefix("Msg_")
+    if let Some(hash) = table_name
+        .strip_prefix("Msg_")
         .or_else(|| table_name.strip_prefix("MSG_"))
         .or_else(|| table_name.strip_prefix("Chat_"))
     {
@@ -1182,8 +1799,7 @@ fn wal_watch_loop(db_dir: &Path, tx: tokio::sync::broadcast::Sender<()>) -> Resu
     }
 
     // 初始化 fanotify (通知模式, 阻塞读取)
-    let fan = Fanotify::new_blocking(FanotifyMode::NOTIF)
-        .with_context(|| "fanotify 初始化失败")?;
+    let fan = Fanotify::new_blocking(FanotifyMode::NOTIF).with_context(|| "fanotify 初始化失败")?;
 
     // 使用 FAN_MARK_MOUNT (挂载点级别标记) 而非 add_path (Inode 级标记)
     // 原因: add_path 对目录的 Inode 标记只监听目录自身的修改,
@@ -1194,7 +1810,10 @@ fn wal_watch_loop(db_dir: &Path, tx: tokio::sync::broadcast::Sender<()>) -> Resu
     fan.add_mountpoint(FanEvent::Modify.into(), &msg_dir)
         .with_context(|| format!("fanotify add_mountpoint 失败: {}", msg_dir.display()))?;
 
-    info!("👁️ 开始监听 WAL: {} (fanotify FAN_MARK_MOUNT, 无冷却期)", wal_path.display());
+    info!(
+        "👁️ 开始监听 WAL: {} (fanotify FAN_MARK_MOUNT, 无冷却期)",
+        wal_path.display()
+    );
 
     let msg_dir_prefix = msg_dir.to_string_lossy().to_string();
 
@@ -1259,14 +1878,13 @@ fn wcdb_get_text(row: &rusqlite::Row, idx: usize) -> String {
 fn discover_msg_tables(conn: &Connection) -> Vec<String> {
     match conn.prepare(
         "SELECT name FROM sqlite_master WHERE type='table' AND \
-         (name LIKE 'ChatMsg_%' OR name LIKE 'MSG_%' OR name LIKE 'Chat_%')"
+         (name LIKE 'ChatMsg_%' OR name LIKE 'MSG_%' OR name LIKE 'Chat_%')",
     ) {
-        Ok(mut stmt) => {
-            stmt.query_map([], |row| row.get(0))
-                .ok()
-                .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default()
-        }
+        Ok(mut stmt) => stmt
+            .query_map([], |row| row.get(0))
+            .ok()
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default(),
         Err(_) => Vec::new(),
     }
 }
@@ -1278,40 +1896,60 @@ fn build_single_table_meta(conn: &Connection, table: &str) -> Option<TableMeta> 
     let columns: Vec<String> = pragma_stmt
         .query_map([], |row| row.get::<_, String>(1))
         .ok()?
-        .filter_map(|r| r.ok()).collect();
+        .filter_map(|r| r.ok())
+        .collect();
 
-    let id_col = columns.iter().find(|c| {
-        c.eq_ignore_ascii_case("local_id") || c.eq_ignore_ascii_case("localId")
-            || c.eq_ignore_ascii_case("rowid")
-    }).cloned().unwrap_or_else(|| "rowid".to_string());
+    let id_col = columns
+        .iter()
+        .find(|c| {
+            c.eq_ignore_ascii_case("local_id")
+                || c.eq_ignore_ascii_case("localId")
+                || c.eq_ignore_ascii_case("rowid")
+        })
+        .cloned()
+        .unwrap_or_else(|| "rowid".to_string());
 
-    let time_col = columns.iter().find(|c| {
-        c.eq_ignore_ascii_case("create_time") || c.eq_ignore_ascii_case("createTime")
-    }).cloned();
+    let time_col = columns
+        .iter()
+        .find(|c| c.eq_ignore_ascii_case("create_time") || c.eq_ignore_ascii_case("createTime"))
+        .cloned();
 
-    let content_col = columns.iter().find(|c| {
-        c.eq_ignore_ascii_case("message_content")
-            || c.eq_ignore_ascii_case("content")
-            || c.eq_ignore_ascii_case("msgContent")
-            || c.eq_ignore_ascii_case("compress_content")
-    }).cloned();
+    let content_col = columns
+        .iter()
+        .find(|c| {
+            c.eq_ignore_ascii_case("message_content")
+                || c.eq_ignore_ascii_case("content")
+                || c.eq_ignore_ascii_case("msgContent")
+                || c.eq_ignore_ascii_case("compress_content")
+        })
+        .cloned();
 
-    let type_col = columns.iter().find(|c| {
-        c.eq_ignore_ascii_case("local_type")
-            || c.eq_ignore_ascii_case("type")
-            || c.eq_ignore_ascii_case("msgType")
-    }).cloned();
+    let type_col = columns
+        .iter()
+        .find(|c| {
+            c.eq_ignore_ascii_case("local_type")
+                || c.eq_ignore_ascii_case("type")
+                || c.eq_ignore_ascii_case("msgType")
+        })
+        .cloned();
 
-    let talker_col = columns.iter().find(|c| {
-        c.eq_ignore_ascii_case("real_sender_id")
-            || c.eq_ignore_ascii_case("talker")
-            || c.eq_ignore_ascii_case("talkerId")
-    }).cloned();
+    let talker_col = columns
+        .iter()
+        .find(|c| {
+            c.eq_ignore_ascii_case("real_sender_id")
+                || c.eq_ignore_ascii_case("talker")
+                || c.eq_ignore_ascii_case("talkerId")
+        })
+        .cloned();
 
-    let svr_col = columns.iter().find(|c| {
-        c.eq_ignore_ascii_case("server_id") || c.eq_ignore_ascii_case("svrid")
-            || c.eq_ignore_ascii_case("msgSvrId")
-    }).cloned();
+    let svr_col = columns
+        .iter()
+        .find(|c| {
+            c.eq_ignore_ascii_case("server_id")
+                || c.eq_ignore_ascii_case("svrid")
+                || c.eq_ignore_ascii_case("msgSvrId")
+        })
+        .cloned();
 
     let content_sel = content_col.as_deref()?;
     let time_sel = time_col.as_deref().unwrap_or("0");
@@ -1319,27 +1957,50 @@ fn build_single_table_meta(conn: &Connection, table: &str) -> Option<TableMeta> 
     let talker_sel = talker_col.as_deref().unwrap_or("''");
     let svr_sel = svr_col.as_deref().unwrap_or("0");
 
-    let status_col = columns.iter().find(|c| {
-        c.eq_ignore_ascii_case("status")
-    }).cloned();
+    let status_col = columns
+        .iter()
+        .find(|c| c.eq_ignore_ascii_case("status"))
+        .cloned();
     let status_sel = status_col.as_deref().unwrap_or("0");
 
-    let source_col = columns.iter().find(|c| {
-        c.eq_ignore_ascii_case("source")
-    }).cloned();
+    let source_col = columns
+        .iter()
+        .find(|c| c.eq_ignore_ascii_case("source"))
+        .cloned();
     let source_sel = source_col.as_deref().unwrap_or("''");
 
     let select_sql = format!(
         "SELECT {id}, {svr}, {time}, {content}, {typ}, {talker}, {status}, {source} \
          FROM [{tbl}] WHERE {id} > ?1 ORDER BY {id} ASC",
-        id = id_col, svr = svr_sel, time = time_sel,
-        content = content_sel, typ = type_sel, talker = talker_sel,
-        status = status_sel, source = source_sel, tbl = table,
+        id = id_col,
+        svr = svr_sel,
+        time = time_sel,
+        content = content_sel,
+        typ = type_sel,
+        talker = talker_sel,
+        status = status_sel,
+        source = source_sel,
+        tbl = table,
+    );
+
+    let history_sql = format!(
+        "SELECT {id}, {svr}, {time}, {content}, {typ}, {talker}, {status}, {source} \
+         FROM [{tbl}] WHERE {time} >= ?1 ORDER BY {time} ASC, {id} ASC LIMIT ?2",
+        id = id_col,
+        svr = svr_sel,
+        time = time_sel,
+        content = content_sel,
+        typ = type_sel,
+        talker = talker_sel,
+        status = status_sel,
+        source = source_sel,
+        tbl = table,
     );
 
     Some(TableMeta {
         table: table.to_string(),
         select_sql,
+        history_sql,
         id_col,
     })
 }
@@ -1350,7 +2011,9 @@ fn parse_msg_content(msg_type: i64, content: &str) -> MsgContent {
     // 微信 msg_type 高位是标志位 (如 0x600000021), 实际类型在低 16 位
     let base_type = (msg_type & 0xFFFF) as i32;
     match base_type {
-        1 => MsgContent::Text { text: content.to_string() },
+        1 => MsgContent::Text {
+            text: content.to_string(),
+        },
         3 => parse_image(content),
         34 => parse_voice(content),
         42 => parse_contact_card(content),
@@ -1358,8 +2021,13 @@ fn parse_msg_content(msg_type: i64, content: &str) -> MsgContent {
         47 => parse_emoji(content),
         48 => parse_location(content),
         49 => parse_app(content),
-        10000 | 10002 => MsgContent::System { text: content.to_string() },
-        _ => MsgContent::Unknown { raw: content.to_string(), msg_type },
+        10000 | 10002 => MsgContent::System {
+            text: content.to_string(),
+        },
+        _ => MsgContent::Unknown {
+            raw: content.to_string(),
+            msg_type,
+        },
     }
 }
 
@@ -1368,8 +2036,7 @@ fn parse_image(content: &str) -> MsgContent {
     let path = extract_xml_attr(content, "img", "cdnmidimgurl")
         .or_else(|| extract_xml_attr(content, "img", "cdnbigimgurl"));
     let md5 = extract_xml_attr(content, "img", "md5");
-    let length = extract_xml_attr(content, "img", "length")
-        .and_then(|v| v.parse::<u64>().ok());
+    let length = extract_xml_attr(content, "img", "length").and_then(|v| v.parse::<u64>().ok());
     // 优先 cdnmidwidth > cdnthumbwidth
     let width = extract_xml_attr(content, "img", "cdnmidwidth")
         .or_else(|| extract_xml_attr(content, "img", "cdnthumbwidth"))
@@ -1379,7 +2046,13 @@ fn parse_image(content: &str) -> MsgContent {
         .or_else(|| extract_xml_attr(content, "img", "cdnthumbheight"))
         .and_then(|v| v.parse::<u32>().ok())
         .filter(|v| *v > 0);
-    MsgContent::Image { path, md5, length, width, height }
+    MsgContent::Image {
+        path,
+        md5,
+        length,
+        width,
+        height,
+    }
 }
 
 /// 语音消息: 提取时长 + CDN URL + AES 密钥
@@ -1390,7 +2063,11 @@ fn parse_voice(content: &str) -> MsgContent {
         .and_then(|v| v.parse::<u32>().ok());
     let voice_url = extract_xml_attr(content, "voicemsg", "voiceurl");
     let aeskey = extract_xml_attr(content, "voicemsg", "aeskey");
-    MsgContent::Voice { duration_ms, voice_url, aeskey }
+    MsgContent::Voice {
+        duration_ms,
+        voice_url,
+        aeskey,
+    }
 }
 
 /// 名片消息 (msg_type=42): 提取昵称、wxid、头像
@@ -1398,7 +2075,11 @@ fn parse_contact_card(content: &str) -> MsgContent {
     let nickname = extract_xml_attr(content, "msg", "nickname");
     let username = extract_xml_attr(content, "msg", "username");
     let avatar_url = extract_xml_attr(content, "msg", "smallheadimgurl");
-    MsgContent::ContactCard { nickname, username, avatar_url }
+    MsgContent::ContactCard {
+        nickname,
+        username,
+        avatar_url,
+    }
 }
 
 /// 视频消息: 提取缩略图 + 视频 CDN + 元数据
@@ -1406,17 +2087,25 @@ fn parse_video(content: &str) -> MsgContent {
     let thumb_path = extract_xml_attr(content, "videomsg", "cdnthumburl");
     let cdn_video_url = extract_xml_attr(content, "videomsg", "cdnvideourl");
     let aeskey = extract_xml_attr(content, "videomsg", "aeskey");
-    let length = extract_xml_attr(content, "videomsg", "length")
-        .and_then(|v| v.parse::<u64>().ok());
-    let play_length = extract_xml_attr(content, "videomsg", "playlength")
-        .and_then(|v| v.parse::<u32>().ok());
+    let length =
+        extract_xml_attr(content, "videomsg", "length").and_then(|v| v.parse::<u64>().ok());
+    let play_length =
+        extract_xml_attr(content, "videomsg", "playlength").and_then(|v| v.parse::<u32>().ok());
     let width = extract_xml_attr(content, "videomsg", "cdnthumbwidth")
         .and_then(|v| v.parse::<u32>().ok())
         .filter(|v| *v > 0);
     let height = extract_xml_attr(content, "videomsg", "cdnthumbheight")
         .and_then(|v| v.parse::<u32>().ok())
         .filter(|v| *v > 0);
-    MsgContent::Video { thumb_path, cdn_video_url, aeskey, length, play_length, width, height }
+    MsgContent::Video {
+        thumb_path,
+        cdn_video_url,
+        aeskey,
+        length,
+        play_length,
+        width,
+        height,
+    }
 }
 
 /// 表情消息: 提取 cdnurl
@@ -1427,15 +2116,18 @@ fn parse_emoji(content: &str) -> MsgContent {
 
 /// 位置消息 (msg_type=48): 提取坐标、名称、地址
 fn parse_location(content: &str) -> MsgContent {
-    let x = extract_xml_attr(content, "location", "x")
-        .and_then(|v| v.parse::<f64>().ok());
-    let y = extract_xml_attr(content, "location", "y")
-        .and_then(|v| v.parse::<f64>().ok());
-    let scale = extract_xml_attr(content, "location", "scale")
-        .and_then(|v| v.parse::<u32>().ok());
+    let x = extract_xml_attr(content, "location", "x").and_then(|v| v.parse::<f64>().ok());
+    let y = extract_xml_attr(content, "location", "y").and_then(|v| v.parse::<f64>().ok());
+    let scale = extract_xml_attr(content, "location", "scale").and_then(|v| v.parse::<u32>().ok());
     let label = extract_xml_attr(content, "location", "label");
     let poiname = extract_xml_attr(content, "location", "poiname");
-    MsgContent::Location { x, y, scale, label, poiname }
+    MsgContent::Location {
+        x,
+        y,
+        scale,
+        label,
+        poiname,
+    }
 }
 
 /// 链接/文件/小程序消息 (msg_type=49): 解析 appmsg XML
@@ -1444,28 +2136,39 @@ fn parse_app(content: &str) -> MsgContent {
     let title = extract_xml_text(content, "title");
     let desc = extract_xml_text(content, "des");
     let url = extract_xml_text(content, "url");
-    let app_type = extract_xml_text(content, "type")
-        .and_then(|t| t.parse::<i32>().ok());
+    let app_type = extract_xml_text(content, "type").and_then(|t| t.parse::<i32>().ok());
 
     // 文件消息判定 (组合策略):
     // 1. 已知文件子类型: 6 (标准文件), 74 (新版文件传输)
     // 2. 兜底: <appattach> + <fileext> + totallen > 0 同时满足
     //    (微信 bug: 公众号文章的 <fileext> 里会塞入标题片段, 但 totallen=0)
     let is_file = matches!(app_type, Some(6) | Some(74))
-        || (content.contains("<appattach>") && content.contains("<fileext>")
+        || (content.contains("<appattach>")
+            && content.contains("<fileext>")
             && extract_xml_text(content, "totallen")
                 .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(0) > 0);
+                .unwrap_or(0)
+                > 0);
     if is_file {
         let file_size = extract_xml_text(content, "totallen")
             .or_else(|| extract_xml_text(content, "filesize"))
             .and_then(|v| v.parse::<u64>().ok());
         let file_ext = extract_xml_text(content, "fileext");
         let md5 = extract_xml_text(content, "md5");
-        return MsgContent::File { title, file_size, file_ext, md5 };
+        return MsgContent::File {
+            title,
+            file_size,
+            file_ext,
+            md5,
+        };
     }
 
-    MsgContent::App { title, desc, url, app_type }
+    MsgContent::App {
+        title,
+        desc,
+        url,
+        app_type,
+    }
 }
 
 /// 从 XML 中提取指定元素的属性值 (如 <img cdnmidimgurl="..."/>)
@@ -1528,6 +2231,33 @@ fn extract_xml_text(xml: &str, tag: &str) -> Option<String> {
         buf.clear();
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attachment_name_rejects_path_traversal() {
+        assert!(valid_attachment_name("report.zip"));
+        assert!(valid_attachment_name("知识库资料.pdf"));
+        assert!(!valid_attachment_name("../secret"));
+        assert!(!valid_attachment_name("a/b.exe"));
+        assert!(!valid_attachment_name("a\\b.apk"));
+    }
+
+    #[test]
+    fn stable_message_id_prefers_server_id() {
+        assert_eq!(stable_message_id(123, "chat", 1, 2), "wx:123");
+        assert_eq!(
+            stable_message_id(0, "chat", 1, 2),
+            stable_message_id(0, "chat", 1, 2),
+        );
+        assert_ne!(
+            stable_message_id(0, "chat", 1, 2),
+            stable_message_id(0, "chat", 2, 2),
+        );
+    }
 }
 
 // =====================================================================

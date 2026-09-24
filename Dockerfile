@@ -68,10 +68,10 @@ ENV LANGUAGE=zh_CN:zh
 ENV LC_ALL=zh_CN.UTF-8
 ENV TZ=Asia/Shanghai
 
-# APT 源: 国内用阿里云加速
+# APT 源: 运行镜像使用实测更快的清华镜像
 RUN if [ "$USE_MIRROR" = "1" ]; then \
-    sed -i 's|http://archive.ubuntu.com|http://mirrors.aliyun.com|g' /etc/apt/sources.list && \
-    sed -i 's|http://security.ubuntu.com|http://mirrors.aliyun.com|g' /etc/apt/sources.list; \
+    sed -i 's|http://archive.ubuntu.com|http://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list && \
+    sed -i 's|http://security.ubuntu.com|http://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list; \
     fi
 
 # 基础包 + 桌面环境 + VNC + 微信依赖 (合并为一次 apt-get, 减少层数)
@@ -115,13 +115,12 @@ COPY --from=builder /build/target/release/mimicwx /usr/local/bin/mimicwx
 RUN chmod +x /usr/local/bin/mimicwx && \
     setcap cap_sys_admin+ep /usr/local/bin/mimicwx
 
-# VNC 配置
+# VNC 目录（密码在容器启动时从 Compose secret 生成）
 USER wechat
 WORKDIR /home/wechat
 
-RUN mkdir -p ~/.vnc && \
-    echo "mimicwx" | vncpasswd -f > ~/.vnc/passwd && \
-    chmod 600 ~/.vnc/passwd
+RUN mkdir -p ~/.vnc ~/mimicwx-linux && \
+    chmod 700 ~/.vnc
 
 RUN printf '#!/bin/bash\nunset SESSION_MANAGER\nunset DBUS_SESSION_BUS_ADDRESS\nexport XKL_XMODMAP_DISABLE=1\nexec startxfce4\n' > ~/.vnc/xstartup && \
     chmod +x ~/.vnc/xstartup
@@ -130,9 +129,18 @@ RUN printf '#!/bin/bash\nunset SESSION_MANAGER\nunset DBUS_SESSION_BUS_ADDRESS\n
 USER root
 COPY docker/dbus-mimicwx.conf /etc/dbus-1/session.d/mimicwx.conf
 COPY docker/start.sh /usr/local/bin/start.sh
-COPY docker/extract_key.py /usr/local/bin/extract_key.py
-RUN sed -i 's/\r$//' /usr/local/bin/start.sh /usr/local/bin/extract_key.py && \
-    chmod +x /usr/local/bin/start.sh /usr/local/bin/extract_key.py
+COPY docker/extract_key.py /usr/local/bin/extract_key_legacy.py
+COPY docker/extract_key_compat.py /usr/local/bin/extract_key_compat.py
+
+# wcdb-key-tool (MIT), pinned at commit 79f1b5b92e12c66aa281b4a60a3c478b5f547dfa.
+# The vendored copy includes a Linux PIE load-bias fix for WeChat 4.1.13.
+COPY vendor/wcdb-key-tool/wcdb_key_tool.py /usr/local/lib/mimicwx/wcdb_key_tool.py
+COPY vendor/wcdb-key-tool/LICENSE /usr/share/doc/wcdb-key-tool/LICENSE
+RUN echo '4290e4fa1738a40f816b035ca26483a0fddcba539ea9664245b82c4a8ce44a1e  /usr/local/lib/mimicwx/wcdb_key_tool.py' | sha256sum -c - && \
+    echo '098659c726e64afd1c503227c1f13866a3ae55a533744185d953828f37c54d8e  /usr/share/doc/wcdb-key-tool/LICENSE' | sha256sum -c - && \
+    sed -i 's/\r$//' /usr/local/bin/start.sh /usr/local/bin/extract_key_legacy.py /usr/local/bin/extract_key_compat.py && \
+    chmod 0755 /usr/local/bin/start.sh /usr/local/bin/extract_key_legacy.py /usr/local/bin/extract_key_compat.py && \
+    chmod 0644 /usr/local/lib/mimicwx/wcdb_key_tool.py /usr/share/doc/wcdb-key-tool/LICENSE
 
 EXPOSE 5901 6080 8899
 CMD ["/usr/local/bin/start.sh"]
