@@ -1,0 +1,53 @@
+name: Feature request
+description: Propose a focused, verifiable improvement
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Preflight checks
+      options:
+        - label: I searched existing issues and did not find an equivalent request.
+          required: true
+        - label: The request does not depend on publishing private WeChat data or credentials.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the concrete limitation or workflow gap.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the desired interface or observable behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Explain existing workarounds and why they are insufficient.
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and security impact
+      description: Note API, WeChat-version, container capability, network, storage, or privacy implications.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List objective checks that would demonstrate completion.
+    validations:
+      required: true

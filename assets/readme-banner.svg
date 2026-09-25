@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-labelledby="title desc">
+  <title id="title">MimicWX-Linux</title>
+  <desc id="desc">Reliable WeChat message and file bridge for Linux</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f172a"/>
+      <stop offset="0.52" stop-color="#132b3d"/>
+      <stop offset="1" stop-color="#064e3b"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5eead4"/>
+      <stop offset="1" stop-color="#22c55e"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#020617" flood-opacity="0.35"/>
+    </filter>
+    <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M 36 0 L 0 0 0 36" fill="none" stroke="#ffffff" stroke-opacity="0.045" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1280" height="320" rx="26" fill="url(#background)"/>
+  <rect width="1280" height="320" rx="26" fill="url(#grid)"/>
+  <circle cx="1112" cy="72" r="180" fill="#34d399" opacity="0.07"/>
+  <circle cx="1168" cy="282" r="132" fill="#2dd4bf" opacity="0.06"/>
+
+  <g transform="translate(106 69)" filter="url(#shadow)">
+    <path d="M24 0h126a24 24 0 0 1 24 24v70a24 24 0 0 1-24 24H82l-38 29 8-29H24A24 24 0 0 1 0 94V24A24 24 0 0 1 24 0Z" fill="url(#accent)"/>
+    <circle cx="48" cy="59" r="8" fill="#052e2b" opacity="0.82"/>
+    <circle cx="87" cy="59" r="8" fill="#052e2b" opacity="0.82"/>
+    <circle cx="126" cy="59" r="8" fill="#052e2b" opacity="0.82"/>
+    <path d="M113 105h72a22 22 0 0 1 22 22v31a22 22 0 0 1-22 22h-20l6 23-31-23h-27a22 22 0 0 1-22-22v-31a22 22 0 0 1 22-22Z" fill="#e2e8f0" opacity="0.96"/>
+    <path d="M123 141h52" stroke="#0f766e" stroke-width="8" stroke-linecap="round"/>
+  </g>
+
+  <g font-family="Inter, Segoe UI, Arial, sans-serif">
+    <text x="378" y="132" fill="#f8fafc" font-size="58" font-weight="700" letter-spacing="-1">MimicWX-Linux</text>
+    <text x="381" y="181" fill="#a7f3d0" font-size="24" font-weight="500">Reliable WeChat message &amp; file bridge for Linux</text>
+    <text x="381" y="226" fill="#cbd5e1" font-size="18">REST · WebSocket · SQLCipher · Docker</text>
+  </g>
+</svg>

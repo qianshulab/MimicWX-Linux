@@ -1,6 +1,25 @@
 # Docker Deployment Guide
 
+> **Applies to:** MimicWX-Linux v0.6.x · **Platform:** x86-64 Linux, Docker Engine 24+, Docker Compose v2
+>
+> 中文版本：[DEPLOYMENT.zh-CN.md](DEPLOYMENT.zh-CN.md)
+
 This guide describes a production-oriented Docker deployment of MimicWX-Linux on an x86-64 Linux host. The container includes the official WeChat Linux client, a lightweight desktop, noVNC, the MimicWX service, and its database-key lifecycle helpers.
+
+## Contents
+
+- [Requirements](#1-requirements)
+- [Directory layout](#2-directory-layout)
+- [Initial setup](#3-initial-setup)
+- [Network configuration](#4-network-configuration)
+- [Build sources and proxies](#5-build-sources-and-proxies)
+- [Start and sign in](#6-start-and-sign-in)
+- [Readiness checks](#7-readiness-checks)
+- [API verification](#8-api-verification)
+- [Persistent data and backup](#9-persistent-data-and-backup)
+- [Upgrade and rollback](#10-upgrade-and-rollback)
+- [Operational security](#11-operational-security)
+- [Troubleshooting](#12-troubleshooting)
 
 ## 1. Requirements
 

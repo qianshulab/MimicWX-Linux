@@ -1,6 +1,36 @@
 # MimicWX API Reference
 
+> **API version:** v0.6 · **Transport:** HTTP/JSON + WebSocket · **Authentication:** Bearer Token
+>
+> 中文版本：[API.zh-CN.md](API.zh-CN.md)
+
 This document describes the v0.6 HTTP and WebSocket interface for using WeChat as a bidirectional data channel. Consumers can ingest messages and files, preserve conversation and sender identity, and send processing results back to the originating chat.
+
+## Contents
+
+- [Conventions](#1-conventions)
+- [Message identity model](#2-message-identity-model)
+- [Health and bootstrap](#3-health-and-bootstrap)
+- [Receiving messages](#4-receiving-messages)
+- [Attachments](#5-attachments)
+- [Sending and replying](#6-sending-and-replying)
+- [Minimal Python consumer](#7-minimal-python-consumer)
+- [Security notes](#8-security-notes)
+
+## Endpoint index
+
+| Method | Path | Authentication | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/status` | No | Service, login, database, and cursor status |
+| `GET` | `/contacts` | Yes | Contacts from the decrypted database |
+| `GET` | `/sessions` | Yes | Current conversations |
+| `GET` | `/messages` | Yes | Independent-cursor real-time buffer |
+| `GET` | `/messages/history` | Yes | Database history catch-up |
+| `GET` | `/attachments/{id}` | Yes | Attachment stream with Range support |
+| `POST` | `/messages/send` | Yes | Send text to a conversation |
+| `POST` | `/messages/reply` | Yes | Reply using a recent message ID |
+| `POST` | `/messages/send-file` | Yes | Send a Base64-encoded file |
+| `GET` | `/ws` | Yes | Real-time WebSocket stream |
 
 ## 1. Conventions
 
@@ -12,6 +42,17 @@ This document describes the v0.6 HTTP and WebSocket interface for using WeChat a
 - Maximum outbound text: 64 KiB
 - Maximum outbound file: 100 MiB after Base64 decoding
 - API errors use an HTTP status code and a JSON body such as `{"error":"reason"}`.
+
+Common status codes:
+
+| Status | Meaning |
+| ---: | --- |
+| `400` | Invalid input, pagination, file name, Base64 data, or size limit |
+| `401` | Missing or invalid API Token |
+| `404` | Unknown recent message or unavailable attachment |
+| `416` | Invalid or unsatisfiable attachment Range |
+| `500` | Internal processing or I/O failure |
+| `503` | Database or input engine is not currently available |
 
 Except for `GET /status`, every endpoint requires the configured token:
 

@@ -1,0 +1,88 @@
+name: Bug report
+description: Report a reproducible MimicWX-Linux defect
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Remove all databases, keys, tokens, contact data, messages, and private attachments before submitting.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Preflight checks
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: This report does not contain credentials, personal data, or private message content.
+          required: true
+        - label: This is not a security vulnerability. Security issues must follow SECURITY.md.
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: MimicWX-Linux version
+      description: Release version or Git commit SHA.
+      placeholder: v0.6.0 / 8205f15
+    validations:
+      required: true
+
+  - type: input
+    id: wechat_version
+    attributes:
+      label: WeChat Linux version
+      placeholder: 4.x.x.x
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Host environment
+      description: Linux distribution, kernel, CPU architecture, Docker, and Compose versions.
+      placeholder: Ubuntu 22.04, Linux 6.x, x86-64, Docker 27.x, Compose v2.x
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest repeatable sequence.
+      placeholder: |
+        1. Start the service with ...
+        2. Sign in to WeChat ...
+        3. Call ...
+        4. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: status
+    attributes:
+      label: Sanitized status and logs
+      description: Include sanitized `/status` output and only the relevant log lines.
+      render: shell
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add any non-sensitive details that may help reproduce the issue.
