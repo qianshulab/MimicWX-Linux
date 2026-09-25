@@ -5,7 +5,7 @@ services:
     build:
       context: .
       args:
-        USE_MIRROR: "1"
+        USE_MIRROR: "${MIMICWX_USE_MIRROR:-1}"
     image: ${MIMICWX_IMAGE:-local/mimicwx-linux:0.6.0}
     container_name: mimicwx-linux
     network_mode: bridge

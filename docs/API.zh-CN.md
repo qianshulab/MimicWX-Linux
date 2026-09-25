@@ -1,11 +1,11 @@
-# MimicWX AI Bridge API（中文）
+# MimicWX API 参考（中文）
 
-本文档对应 v0.6，用于把微信接入 AI 知识库或自动化工作流：实时接收文本和文件，准确保留“会话/发送者”关系，处理后把结果回复到原聊天。
+本文档对应 v0.6，说明如何通过 HTTP 与 WebSocket 接收微信文本和文件、保留“会话/发送者”关系，并把处理结果回复到原聊天。
 
 ## 基础约定
 
-- HTTP：`http://NAS地址:8899`
-- WebSocket：`ws://NAS地址:8899/ws`
+- HTTP：`http://服务地址:8899`
+- WebSocket：`ws://服务地址:8899/ws`
 - 编码：UTF-8 JSON
 - 时间：Unix 秒
 - 分页上限：500 条
@@ -39,9 +39,9 @@ Authorization: Bearer YOUR_API_TOKEN
 | `parsed` | 按消息类型解析后的结构化内容。 |
 | `attachment` | 文件下载信息；非文件消息为 `null`。 |
 
-旧字段 `chat`、`chat_display_name`、`talker`、`talker_display_name` 仅用于兼容，新的 AI 集成应使用 `conversation_*` 和 `sender_*`。
+旧字段 `chat`、`chat_display_name`、`talker`、`talker_display_name` 仅用于兼容，新接入应使用 `conversation_*` 和 `sender_*`。
 
-在私聊中，收到的消息通常同时以联系人作为会话和发送者；在群聊中，`conversation_id` 是群 ID，而 `sender_id` 是成员 ID。AI 系统应把回答投递到 `conversation_id`，并用 `sender_id` 关联提问者。
+在私聊中，收到的消息通常同时以联系人作为会话和发送者；在群聊中，`conversation_id` 是群 ID，而 `sender_id` 是成员 ID。调用方应把回复投递到 `conversation_id`，并用 `sender_id` 关联实际发送者。
 
 ## 服务状态
 
@@ -82,7 +82,7 @@ Authorization: Bearer YOUR_API_TOKEN
 1. 断线指数退避重连；
 2. 按 `message_id` 持久化去重；
 3. WebSocket 中断期间通过历史接口补拉；
-4. 用有界队列接收，避免 AI 处理变慢时无限占用内存。
+4. 用有界队列接收，避免下游处理变慢时无限占用内存。
 
 ### `GET /messages`
 
@@ -126,14 +126,14 @@ Authorization: Bearer YOUR_API_TOKEN
 
 ### 推荐的可靠消费流程
 
-1. AI 服务持久化已处理的 `message_id` 和最新 `create_time`。
+1. 消费方持久化已处理的 `message_id` 和最新 `create_time`。
 2. 先建立 WebSocket 并暂存实时事件。
 3. 调用 `/messages/history?since=上次时间&offset=0`；固定 `since`，按 `next_offset` 翻页并跳过已处理 ID。
 4. 再处理暂存的 WebSocket 事件，同样按 ID 去重。
 5. 正常持续接收，并定期持久化处理水位。
 6. 断线或 MimicWX 重启后回到第 2 步。
 
-这形成至少一次投递语义：宁可重复，不静默丢失。MimicWX 只在本地持久化数据库表水位，不额外落盘明文消息；业务级持久化和幂等由 AI 服务负责。
+这形成至少一次投递语义：宁可重复，不静默丢失。MimicWX 只在本地持久化数据库表水位，不额外落盘明文消息；业务级持久化和幂等由消费方负责。
 
 旧接口 `GET /messages/new` 继续兼容，但无参数时为共享单消费者，不建议新系统使用。
 
@@ -144,7 +144,7 @@ Authorization: Bearer YOUR_API_TOKEN
 ```json
 {
   "id": "URL_SAFE_OPAQUE_ID",
-  "name": "knowledge.zip",
+  "name": "archive.zip",
   "size": 1048576,
   "extension": "zip",
   "md5": "可选MD5",
@@ -159,13 +159,13 @@ Authorization: Bearer YOUR_API_TOKEN
 
 附件 ID 是不含服务器路径的元数据定位符。后端只允许在当前微信账号的附件白名单目录中查找，并拒绝路径穿越、软链接逃逸和不匹配的文件。
 
-`available=false` 表示微信暂未把文件写入本地；下载接口每次都会重新解析，因此调用方可以退避重试。Office 文档、ZIP、APK、EXE 等均只作为字节返回，MimicWX 不执行它们。AI 知识库应在入库前执行自己的大小限制、哈希记录、病毒扫描、真实文件类型识别和沙箱解析。
+`available=false` 表示微信暂未把文件写入本地；下载接口每次都会重新解析，因此调用方可以退避重试。Office 文档、ZIP、APK、EXE 等均只作为字节返回，MimicWX 不执行它们。下游系统应在处理前执行大小限制、哈希记录、病毒扫描、真实文件类型识别和沙箱解析。
 
 ```bash
 curl --fail --location \
   -H "Authorization: Bearer $MIMICWX_TOKEN" \
   -o attachment.bin \
-  "http://NAS地址:8899/attachments/URL_SAFE_OPAQUE_ID"
+  "http://服务地址:8899/attachments/URL_SAFE_OPAQUE_ID"
 ```
 
 ## 回复与推送
@@ -187,7 +187,7 @@ curl --fail --location \
 ```json
 {
   "message_id": "wx:123456789",
-  "text": "已生成 128 个知识片段。",
+  "text": "处理完成。",
   "mention_sender": true
 }
 ```
@@ -215,14 +215,14 @@ curl --fail --location \
 - `POST /chat`：打开聊天
 - `GET|POST|DELETE /listen`：管理独立监听窗口
 
-## AI 知识库处理建议
+## 生产集成建议
 
 - 业务主键：`message_id`。
 - 路由主键：`conversation_id`；提问者主键：`sender_id`。
 - 对 `direction=outgoing` 做过滤或单独归档，避免机器人消费自己的回复形成循环。
 - 先把消息放入持久化队列，再异步下载和解析附件。
 - 记录附件哈希，不按扩展名信任内容类型。
-- 回复时保存原 `message_id`、AI 任务 ID 和回复状态，保证重试幂等。
+- 回复时保存原 `message_id`、业务任务 ID 和回复状态，保证重试幂等。
 - 对发送设置速率限制和人工兜底，避免异常循环刷屏。
 - 不要把 API/noVNC 直接暴露到公网；Token、微信数据和附件备份均按敏感数据保护。
 

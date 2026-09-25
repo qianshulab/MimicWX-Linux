@@ -2,8 +2,10 @@
 name = "mimicwx"
 version = "0.6.0"
 edition = "2021"
-description = "Zero-risk WeChat automation framework for Linux via AT-SPI2 + X11 XTEST + SQLCipher"
+description = "WeChat message and file bridge for Linux via AT-SPI2, X11 XTEST, and SQLCipher"
 license = "MIT"
+repository = "https://github.com/qianshulab/MimicWX-Linux"
+readme = "README.md"
 
 [[bin]]
 name = "mimicwx"

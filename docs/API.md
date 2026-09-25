@@ -1,11 +1,11 @@
-# MimicWX AI Bridge API
+# MimicWX API Reference
 
-This document describes the v0.6 HTTP and WebSocket interface for using WeChat as a bidirectional data channel. The intended consumer is an AI knowledge base, workflow engine, or bot that needs to ingest messages and files, preserve conversation/sender identity, and send the processing result back to the originating chat.
+This document describes the v0.6 HTTP and WebSocket interface for using WeChat as a bidirectional data channel. Consumers can ingest messages and files, preserve conversation and sender identity, and send processing results back to the originating chat.
 
 ## 1. Conventions
 
-- HTTP base URL: `http://NAS_ADDRESS:8899`
-- WebSocket URL: `ws://NAS_ADDRESS:8899/ws`
+- HTTP base URL: `http://HOST:8899`
+- WebSocket URL: `ws://HOST:8899/ws`
 - JSON encoding: UTF-8
 - Timestamps: Unix seconds
 - Maximum page size: 500 messages
@@ -19,7 +19,7 @@ Except for `GET /status`, every endpoint requires the configured token:
 Authorization: Bearer YOUR_API_TOKEN
 ```
 
-For WebSocket clients that cannot set an authorization header, use `ws://NAS_ADDRESS:8899/ws?token=YOUR_URL_ENCODED_TOKEN`. Query-string authentication can leak through URLs and logs, so prefer a header and TLS-capable reverse proxy whenever possible.
+For WebSocket clients that cannot set an authorization header, use `ws://HOST:8899/ws?token=YOUR_URL_ENCODED_TOKEN`. Query-string authentication can leak through URLs and logs, so prefer a header and TLS-capable reverse proxy whenever possible.
 
 ## 2. Message identity model
 
@@ -59,7 +59,7 @@ Example private message:
 }
 ```
 
-For a group message, `conversation_id` is the group ID and `sender_id` is the member ID. This distinction is what lets an AI service route the answer back to the group while retaining the person who asked the question.
+For a group message, `conversation_id` is the group ID and `sender_id` is the member ID. This distinction lets a consumer route a response back to the group while retaining the identity of the person who sent the message.
 
 ## 3. Health and bootstrap
 
@@ -151,14 +151,14 @@ After the final page, persist `checkpoint_time` as the next run's inclusive `sin
 
 ### Recommended reliable consumer flow
 
-1. Persist every processed `message_id` and the latest `create_time` in the AI service.
+1. Persist every processed `message_id` and the latest `create_time` in the consuming service.
 2. Connect the WebSocket and temporarily buffer live events.
 3. Call `/messages/history?since=LAST_CREATE_TIME&offset=0`; while `has_more=true`, keep `since` fixed and advance to `next_offset`.
 4. Drain the buffered WebSocket events, again deduplicating by `message_id`.
 5. Continue consuming WebSocket events; periodically checkpoint `create_time` and processed IDs.
 6. After a disconnect or service restart, repeat from step 2.
 
-This provides at-least-once delivery semantics. MimicWX persists only database table watermarks, not plaintext messages; the AI service remains responsible for durable business-level deduplication.
+This provides at-least-once delivery semantics. MimicWX persists only database table watermarks, not plaintext messages; the consuming service remains responsible for durable business-level deduplication.
 
 `GET /messages/new` remains available for old clients. Its no-parameter mode is a single shared consumer and should not be used for new multi-consumer integrations.
 
@@ -170,7 +170,7 @@ A parsed file message can contain:
 {
   "attachment": {
     "id": "URL_SAFE_OPAQUE_ID",
-    "name": "knowledge.zip",
+    "name": "archive.zip",
     "size": 1048576,
     "extension": "zip",
     "md5": "optional-md5",
@@ -194,7 +194,7 @@ Example:
 curl --fail --location \
   -H "Authorization: Bearer $MIMICWX_TOKEN" \
   -o attachment.bin \
-  "http://NAS_ADDRESS:8899/attachments/URL_SAFE_OPAQUE_ID"
+  "http://HOST:8899/attachments/URL_SAFE_OPAQUE_ID"
 ```
 
 ## 6. Sending and replying
@@ -284,7 +284,7 @@ async def run():
                 if event.get("type") != "db_message":
                     continue
                 # Enqueue by message_id, preserve conversation_id/sender_id,
-                # download attachment if present, then call the AI pipeline.
+                # Download an attachment if present, then dispatch downstream.
                 print(event["message_id"], event["conversation_id"], event["sender_id"])
 
 asyncio.run(run())
@@ -294,7 +294,7 @@ Production consumers should implement the history/bootstrap flow above, durable 
 
 ## 8. Security notes
 
-- Keep the API on a trusted LAN or behind an authenticated TLS reverse proxy.
+- Keep the API on a trusted private network or behind an authenticated TLS reverse proxy.
 - Always configure a long random API token; never commit it to Git.
 - Do not expose noVNC or the API directly to the public Internet.
 - Treat incoming Office files, archives, APKs, and executables as untrusted input.
