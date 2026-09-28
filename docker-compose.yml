@@ -6,7 +6,7 @@ services:
       context: .
       args:
         USE_MIRROR: "${MIMICWX_USE_MIRROR:-1}"
-    image: ${MIMICWX_IMAGE:-local/mimicwx-linux:0.6.0}
+    image: ${MIMICWX_IMAGE:-local/mimicwx-linux:0.6.1}
     container_name: mimicwx-linux
     network_mode: bridge
     init: true
@@ -34,7 +34,7 @@ services:
     tmpfs:
       - /tmp:size=1g,mode=1777
     pids_limit: 1024
-    restart: unless-stopped
+    restart: always
     stop_grace_period: 30s
     logging:
       driver: json-file

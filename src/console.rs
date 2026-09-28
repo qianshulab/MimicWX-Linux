@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
+use arc_swap::ArcSwapOption;
 use tracing::{debug, info, warn};
 
 use crate::api;
@@ -63,7 +64,7 @@ fn redraw_prompt(line: &str, cursor: usize) {
 async fn handle_command(
     cmd: &str, exit_code: &Arc<AtomicI32>,
     shutdown_tx: &tokio::sync::broadcast::Sender<()>,
-    wechat: &Arc<wechat::WeChat>, db: &Option<Arc<db::DbManager>>,
+    wechat: &Arc<wechat::WeChat>, db: &Arc<ArcSwapOption<db::DbManager>>,
     broadcast_tx: &tokio::sync::broadcast::Sender<String>,
     input_tx: &tokio::sync::mpsc::Sender<api::InputCommand>,
     config_path: &Option<PathBuf>,
@@ -82,8 +83,9 @@ async fn handle_command(
         "/status" => {
             let status = wechat.check_status().await;
             let listen_list = wechat.get_listen_list().await;
-            let db_status = if db.is_some() { "可用" } else { "不可用" };
-            let contacts = if let Some(ref d) = db { d.get_contacts().await.len() } else { 0 };
+            let current_db = db.load_full();
+            let db_status = if current_db.is_some() { "可用" } else { "不可用" };
+            let contacts = if let Some(ref d) = current_db { d.get_contacts().await.len() } else { 0 };
             info!("📊 === 运行时状态 ===");
             info!("📊 微信状态: {}", status);
             info!("📊 数据库: {} | 联系人: {} 条", db_status, contacts);
@@ -92,7 +94,7 @@ async fn handle_command(
             info!("📊 =================="); false
         }
         "/refresh" => {
-            if let Some(ref d) = db {
+            if let Some(d) = db.load_full() {
                 info!("[contacts] 手动刷新联系人...");
                 match d.refresh_contacts().await {
                     Ok(n) => info!("[contacts] 刷新完成: {} 条", n),
@@ -172,7 +174,7 @@ async fn handle_command(
             false
         }
         "/sessions" => {
-            if let Some(ref d) = db {
+            if let Some(d) = db.load_full() {
                 match d.get_sessions().await {
                     Ok(sessions) => {
                         info!("[session] === 会话列表 ({} 个) ===", sessions.len());
@@ -199,7 +201,7 @@ async fn handle_command(
                 } else {
                     info!("[send] 发送消息: [{to}] → {text}");
                     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                    let has_db = db.is_some();
+                    let has_db = db.load().is_some();
                     if input_tx.send(api::InputCommand::SendMessage {
                         to: to.to_string(), text: text.to_string(),
                         at: vec![], skip_verify: has_db,
@@ -300,7 +302,7 @@ pub async fn console_loop(
     exit_code: Arc<AtomicI32>,
     shutdown_tx: tokio::sync::broadcast::Sender<()>,
     wechat: Arc<wechat::WeChat>,
-    db: Option<Arc<db::DbManager>>,
+    db: Arc<ArcSwapOption<db::DbManager>>,
     broadcast_tx: tokio::sync::broadcast::Sender<String>,
     input_tx: tokio::sync::mpsc::Sender<api::InputCommand>,
     config_path: Option<PathBuf>,
@@ -429,7 +431,7 @@ async fn console_loop_simple(
     exit_code: Arc<AtomicI32>,
     shutdown_tx: tokio::sync::broadcast::Sender<()>,
     wechat: Arc<wechat::WeChat>,
-    db: Option<Arc<db::DbManager>>,
+    db: Arc<ArcSwapOption<db::DbManager>>,
     broadcast_tx: tokio::sync::broadcast::Sender<String>,
     input_tx: tokio::sync::mpsc::Sender<api::InputCommand>,
     config_path: Option<PathBuf>,

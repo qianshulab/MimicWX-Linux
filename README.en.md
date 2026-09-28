@@ -16,7 +16,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2563eb?style=flat-square" alt="MIT License"></a>
-  <img src="https://img.shields.io/badge/version-0.6.0-0f766e?style=flat-square" alt="Version 0.6.0">
+  <img src="https://img.shields.io/badge/version-0.6.1-0f766e?style=flat-square" alt="Version 0.6.1">
   <img src="https://img.shields.io/badge/platform-Linux%20x86__64-f59e0b?style=flat-square" alt="Linux x86-64">
   <img src="https://img.shields.io/badge/core-Rust-ce422b?style=flat-square" alt="Rust">
   <a href="https://github.com/qianshulab/MimicWX-Linux/commits/main"><img src="https://img.shields.io/github/last-commit/qianshulab/MimicWX-Linux?style=flat-square" alt="Last commit"></a>

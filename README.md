@@ -16,7 +16,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2563eb?style=flat-square" alt="MIT License"></a>
-  <img src="https://img.shields.io/badge/version-0.6.0-0f766e?style=flat-square" alt="Version 0.6.0">
+  <img src="https://img.shields.io/badge/version-0.6.1-0f766e?style=flat-square" alt="Version 0.6.1">
   <img src="https://img.shields.io/badge/platform-Linux%20x86__64-f59e0b?style=flat-square" alt="Linux x86-64">
   <img src="https://img.shields.io/badge/core-Rust-ce422b?style=flat-square" alt="Rust">
   <a href="https://github.com/qianshulab/MimicWX-Linux/commits/main"><img src="https://img.shields.io/github/last-commit/qianshulab/MimicWX-Linux?style=flat-square" alt="Last commit"></a>
@@ -205,7 +205,7 @@ curl --fail -X POST http://HOST:8899/messages/send \
 | --- | --- | --- |
 | API Token | `config.local.toml` | 生产环境必须设置长随机值 |
 | 主机绑定地址 | `MIMICWX_BIND_IP=127.0.0.1` | API 与 noVNC 的监听地址 |
-| 镜像标签 | `MIMICWX_IMAGE=local/mimicwx-linux:0.6.0` | 建议升级时使用不可变标签 |
+| 镜像标签 | `MIMICWX_IMAGE=local/mimicwx-linux:0.6.1` | 建议升级时使用不可变标签 |
 | 微信数据 | `data/xwechat/` | 包含账号数据、数据库和密钥映射 |
 | 微信文件 | `data/xwechat_files/` | 文件接收与缓存目录 |
 | VNC 密码源 | `secrets/vnc_password.txt` | 权限应保持为 `0600` |

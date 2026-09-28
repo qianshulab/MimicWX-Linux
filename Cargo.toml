@@ -1,6 +1,6 @@
 [package]
 name = "mimicwx"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 description = "WeChat message and file bridge for Linux via AT-SPI2, X11 XTEST, and SQLCipher"
 license = "MIT"

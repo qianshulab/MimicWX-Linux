@@ -11,6 +11,17 @@ All notable changes to MimicWX-Linux are documented in this file. The format fol
 - Added structured issue forms and a pull request checklist.
 - Standardized terminology, navigation, compatibility notes, and security guidance across the documentation set.
 
+## [0.6.1] - 2026-09-28
+
+### Changed
+
+- Started the status API before WeChat login and database initialization so health checks remain available throughout bootstrap.
+- Switched the Compose restart policy to `always` for host-reboot recovery.
+- Added a critical-process watchdog for VNC, WeChat, and noVNC.
+- Prevented XFCE screensaver activation from obscuring the noVNC login view.
+- Shortened synchronous key validation during startup while retaining the long-running login and key-rotation watcher.
+- Hardened runtime configuration ownership and permissions before launching MimicWX.
+
 ## [0.6.0] - 2026-09-25
 
 ### Added

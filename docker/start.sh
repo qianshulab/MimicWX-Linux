@@ -17,6 +17,10 @@ echo 0 > /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || true
 chmod 666 /dev/uinput 2>/dev/null || true
 chown -R wechat:wechat /home/wechat/.xwechat 2>/dev/null || true
 chown -R wechat:wechat /home/wechat/mimicwx-linux 2>/dev/null || true
+if [ -f /home/wechat/mimicwx-linux/config.toml ]; then
+  chown wechat:wechat /home/wechat/mimicwx-linux/config.toml 2>/dev/null || true
+  chmod 600 /home/wechat/mimicwx-linux/config.toml 2>/dev/null || true
+fi
 mkdir -p /home/wechat/.xwechat/crashinfo/attachments
 chown -R wechat:wechat /home/wechat/.xwechat
 
@@ -88,6 +92,11 @@ su - wechat << 'USEREOF'
   xfconf-query -c xfce4-screensaver -p /saver/enabled -s false 2>/dev/null || true
   xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-enabled -s false 2>/dev/null || true
   xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/blank-on-ac -s 0 2>/dev/null || true
+  # XFCE may start the screensaver after the settings above are applied.
+  # Stop it explicitly so noVNC never comes back as a black/locked screen.
+  xfce4-screensaver-command --deactivate 2>/dev/null || true
+  xfce4-screensaver-command --exit 2>/dev/null || true
+  pkill -f xfce4-screensaver 2>/dev/null || true
 
   # 3) 清理 XFCE 自启的 AT-SPI2 (避免 bus 冲突)
   for _r in 1 2 3; do
@@ -172,7 +181,9 @@ case "$WECHAT_VERSION" in
     ;;
   *)
     echo "[extract_key] 使用微信 4.1+ 兼容提取器"
-    python3 -u /usr/local/bin/extract_key_compat.py once --capture-timeout 600 \
+    # Fast-path existing HMAC-verified keys without delaying API availability.
+    # The long-running watcher below captures a rotated key after login.
+    python3 -u /usr/local/bin/extract_key_compat.py once --capture-timeout 5 \
       > /tmp/extract_key.log 2>&1 || true
     setsid python3 -u /usr/local/bin/extract_key_compat.py monitor --interval 60 \
       >> /tmp/extract_key.log 2>&1 &
@@ -188,6 +199,31 @@ echo "[extract_key] 启动校验完成, 详见 /tmp/extract_key.log"
 # 8) MimicWX (heredoc 之外运行, 保留 stdin 用于控制台命令)
 # ============================================================
 echo "=============================="
+
+# Critical-process watchdog. Docker restart policies only react when the
+# container exits; an unhealthy child process alone is not restarted.
+START_SCRIPT_PID=$$
+(
+  sleep 30
+  while sleep 15; do
+    if ! pgrep -x Xtigervnc >/dev/null 2>&1; then
+      echo "[watchdog] [err] VNC exited; restarting container"
+      kill -TERM "$START_SCRIPT_PID"
+      exit 1
+    fi
+    if ! pgrep -x wechat >/dev/null 2>&1; then
+      echo "[watchdog] [err] WeChat exited; restarting container"
+      kill -TERM "$START_SCRIPT_PID"
+      exit 1
+    fi
+    if ! pgrep -f '[w]ebsockify.*6080' >/dev/null 2>&1; then
+      echo "[watchdog] [err] noVNC exited; restarting container"
+      kill -TERM "$START_SCRIPT_PID"
+      exit 1
+    fi
+  done
+) &
+WATCHDOG_PID=$!
 echo "MimicWX-Linux Ready!"
 echo "noVNC: http://localhost:6080/vnc.html"
 echo "API:   http://localhost:8899"
@@ -213,7 +249,7 @@ while true; do
         python3 -u /usr/local/bin/extract_key_legacy.py >> /tmp/extract_key.log 2>&1 || true
         ;;
       *)
-        python3 -u /usr/local/bin/extract_key_compat.py once --capture-timeout 600 \
+        python3 -u /usr/local/bin/extract_key_compat.py once --capture-timeout 5 \
           >> /tmp/extract_key.log 2>&1 || true
         ;;
     esac
@@ -227,3 +263,4 @@ while true; do
 done
 
 echo "[start.sh] 容器退出"
+kill "$WATCHDOG_PID" 2>/dev/null || true

@@ -92,7 +92,7 @@ Authorization: Bearer YOUR_API_TOKEN
 ```json
 {
   "status": "已登录",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "listen_count": 0,
   "db_available": true,
   "contacts": 42,

@@ -173,6 +173,20 @@ docker compose logs --tail=200 mimicwx
 
 Compose 健康检查只确认 API 进程可以响应 `/status`。消息消费方仍需判断响应中的登录状态和 `db_available`。
 
+### 主机重启恢复
+
+Compose 使用 `restart: always`，Docker 服务在主机启动后会自动恢复容器。API 会先于微信登录和数据库初始化监听，因此即使微信需要重新确认登录，`/status` 仍可访问并报告当前状态。VNC、微信或 noVNC 关键进程异常退出时，容器内看门狗会让容器退出，由 Docker 自动重新拉起。
+
+如果微信平台要求重新确认登录，这是账号安全流程，不能由容器绕过。此时打开 noVNC 完成确认；登录后密钥监听器会自动捕获或校验数据库密钥，无需重建镜像。
+
+手动恢复命令：
+
+```bash
+docker compose up -d mimicwx
+docker compose restart mimicwx
+docker compose logs --tail=200 mimicwx
+```
+
 ## 8. 接口验证
 
 设置连接参数时，应避免把真实 Token 长期保留在 shell 历史中：

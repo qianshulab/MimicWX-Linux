@@ -20,6 +20,7 @@ mod input;
 mod wechat;
 
 use anyhow::Result;
+use arc_swap::ArcSwapOption;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
@@ -78,6 +79,55 @@ async fn main() -> Result<()> {
         atspi.clone(),
         config.timing.at_delay_ms,
     ));
+
+    // API 必须先于微信登录和数据库初始化启动，这样容器重启后 /status
+    // 始终可用，并能明确报告 WaitingForLogin，而不是直接拒绝连接。
+    let (tx, _) = tokio::sync::broadcast::channel::<String>(128);
+    let message_store = Arc::new(api::MessageStore::new(4096));
+    let (input_tx, input_rx) = tokio::sync::mpsc::channel::<api::InputCommand>(32);
+    if let Some(eng) = engine {
+        api::spawn_input_actor(eng, wechat.clone(), input_rx);
+    } else {
+        warn!("[warn] X11 输入引擎不可用, InputEngine actor 未启动");
+    }
+
+    let db_slot = Arc::new(ArcSwapOption::empty());
+    let state = Arc::new(api::AppState {
+        wechat: wechat.clone(),
+        atspi: atspi.clone(),
+        input_tx: input_tx.clone(),
+        tx: tx.clone(),
+        db: db_slot.clone(),
+        messages: message_store.clone(),
+        api_token: config.api.token.filter(|t| !t.is_empty()),
+        start_time: std::time::Instant::now(),
+        config_path: config_path.clone(),
+    });
+
+    let exit_code = Arc::new(AtomicI32::new(0));
+    let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+    let mut api_shutdown = shutdown_tx.subscribe();
+    let app = api::build_router(state.clone());
+    let addr = "0.0.0.0:8899";
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = api_shutdown.recv().await;
+            })
+            .await
+        {
+            error!("[err] API 服务异常退出: {e}");
+        }
+    });
+    info!("🌐 API 服务启动: http://{addr}");
+    info!("📡 WebSocket: ws://{addr}/ws");
+    info!("[pin] 端点: /status, /contacts, /sessions, /messages, /messages/history, /messages/send, /messages/reply, /attachments/:id, /ws");
+    if state.api_token.is_some() {
+        info!("🔒 API 认证已启用 (Bearer Token)");
+    } else {
+        warn!("[warn] API 认证未启用 (config.toml [api] token 未配置)");
+    }
 
     // ⑤ 等待微信就绪
     let mut attempts = 0;
@@ -260,52 +310,9 @@ async fn main() -> Result<()> {
         }
     };
 
-    // ⑦ 广播通道 (WebSocket)
-    let (tx, _) = tokio::sync::broadcast::channel::<String>(128);
-    let message_store = Arc::new(api::MessageStore::new(4096));
-
-    // ⑧ InputEngine Actor + API 服务
-    let (input_tx, input_rx) = tokio::sync::mpsc::channel::<api::InputCommand>(32);
-
-    // Spawn actor (engine 所有权转移给 actor)
-    if let Some(eng) = engine {
-        api::spawn_input_actor(eng, wechat.clone(), input_rx);
-    } else {
-        warn!("[warn] X11 输入引擎不可用, InputEngine actor 未启动");
-    }
-
-    let state = Arc::new(api::AppState {
-        wechat: wechat.clone(),
-        atspi: atspi.clone(),
-        input_tx: input_tx.clone(),
-        tx: tx.clone(),
-        db: db_manager.clone(),
-        messages: message_store.clone(),
-        api_token: config.api.token.filter(|t| !t.is_empty()),
-        start_time: std::time::Instant::now(),
-        config_path: config_path.clone(),
-    });
-
-    let app = api::build_router(state.clone());
-    let addr = "0.0.0.0:8899";
-    info!("🌐 API 服务启动: http://{addr}");
-    info!("📡 WebSocket: ws://{addr}/ws");
-    info!("[pin] 端点: /status, /contacts, /sessions, /messages, /messages/history, /messages/send, /messages/reply, /attachments/:id, /ws");
-    if state.api_token.is_some() {
-        info!("🔒 API 认证已启用 (Bearer Token)");
-    } else {
-        warn!("[warn] API 认证未启用 (config.toml [api] token 未配置)");
-    }
-
-    // 退出码: 0=正常退出, 42=重启
-    let exit_code = Arc::new(AtomicI32::new(0));
-
-    // 关闭信号 (Ctrl+C 或 /restart 触发)
-    let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
-    let shutdown_tx_clone = shutdown_tx.clone();
-
-    // 保留 db_manager 引用给控制台命令使用 (db_manager 会被下面的 if let 消费)
-    let console_db_ref = db_manager.clone();
+    // 数据库在 API 启动后动态挂载；等待登录期间接口仍然可用。
+    db_slot.store(db_manager.clone());
+    let console_db_ref = db_slot.clone();
 
     // ⑧½ AT-SPI2 健康检查心跳 (每 30s 检查连接, 连续 3 次异常自动重连)
     {
@@ -475,27 +482,18 @@ async fn main() -> Result<()> {
         });
     }
 
-    // ⑫ 启动 HTTP 服务 (带优雅退出)
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-
     // 打印控制台命令提示
     info!("[help] 控制台命令: /restart /stop /status /refresh /help");
 
-    // 优雅退出: 监听 shutdown 信号 + Ctrl+C
-    let mut shutdown_rx = shutdown_tx_clone.subscribe();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            // 等待 shutdown 信号或 Ctrl+C
-            tokio::select! {
-                _ = shutdown_rx.recv() => {
-                    info!("🛑 收到关闭信号, 停止 API 服务...");
-                }
-                _ = tokio::signal::ctrl_c() => {
-                    info!("🛑 收到 Ctrl+C, 停止服务...");
-                }
-            }
-        })
-        .await?;
+    // 主任务等待控制台关闭命令或 Ctrl+C；API 已在后台运行。
+    let mut shutdown_rx = shutdown_tx.subscribe();
+    tokio::select! {
+        _ = shutdown_rx.recv() => info!("🛑 收到关闭信号, 停止服务..."),
+        _ = tokio::signal::ctrl_c() => {
+            info!("🛑 收到 Ctrl+C, 停止服务...");
+            let _ = shutdown_tx.send(());
+        }
+    }
 
     let code = exit_code.load(Ordering::Relaxed);
     if code == 42 {

@@ -167,6 +167,20 @@ docker compose logs --tail=200 mimicwx
 
 The Compose health check queries `/status`. It confirms that the API process responds; consumers must also inspect `status` and `db_available` before reading messages.
 
+### Host reboot recovery
+
+Compose uses `restart: always`, so Docker restores the container when the host starts. The API binds before WeChat login and database initialization; `/status` therefore remains reachable and reports the current bootstrap state even when WeChat requires login confirmation. An in-container watchdog exits the container if VNC, WeChat, or noVNC dies, allowing Docker to restart the complete service stack.
+
+WeChat may still require a user confirmation after a host reboot. This account-security step cannot be bypassed by the container. Open noVNC to complete it; the key watcher will then capture or validate the database key without an image rebuild.
+
+Manual recovery commands:
+
+```bash
+docker compose up -d mimicwx
+docker compose restart mimicwx
+docker compose logs --tail=200 mimicwx
+```
+
 ## 8. API verification
 
 Set the connection values without storing them in shell history when possible:

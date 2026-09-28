@@ -31,6 +31,7 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use arc_swap::ArcSwapOption;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -151,7 +152,7 @@ pub struct AppState {
     pub input_tx: tokio::sync::mpsc::Sender<InputCommand>,
     pub tx: broadcast::Sender<String>,
     /// 数据库管理器 (密钥获取成功时可用)
-    pub db: Option<Arc<DbManager>>,
+    pub db: Arc<ArcSwapOption<DbManager>>,
     /// 多客户端安全的实时消息缓存。
     pub messages: Arc<MessageStore>,
     /// API 认证 Token (None = 不启用认证)
@@ -561,8 +562,9 @@ struct ListenResponse {
 async fn get_status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
     let status = state.wechat.check_status().await;
     let listen_count = state.wechat.get_listen_list().await.len();
-    let db_available = state.db.is_some();
-    let contacts = if let Some(ref d) = state.db {
+    let db = state.db.load_full();
+    let db_available = db.is_some();
+    let contacts = if let Some(ref d) = db {
         d.get_contacts().await.len()
     } else {
         0
@@ -623,7 +625,7 @@ struct MessageSendResponse {
 async fn get_contacts(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, ApiError> {
     let db = state
         .db
-        .as_ref()
+        .load_full()
         .ok_or_else(|| ApiError::unavailable("数据库不可用"))?;
     let contacts = db.get_contacts().await;
     Ok(Json(serde_json::json!({ "contacts": contacts })))
@@ -663,7 +665,7 @@ async fn get_message_history(
 ) -> Result<Json<MessageHistoryResponse>, ApiError> {
     let db = state
         .db
-        .as_ref()
+        .load_full()
         .ok_or_else(|| ApiError::unavailable("数据库不可用"))?;
     let requested_limit = query.limit.clamp(1, 500);
     if query.offset > 100_000 {
@@ -783,7 +785,7 @@ async fn download_attachment(
 ) -> Result<Response, ApiError> {
     let db = state
         .db
-        .as_ref()
+        .load_full()
         .ok_or_else(|| ApiError::unavailable("数据库不可用"))?;
     let resolved = db
         .resolve_attachment(&id)
@@ -859,10 +861,11 @@ async fn dispatch_text(
         return Err(ApiError::bad_request("单条消息最多 @ 100 人"));
     }
     // DB 可用时跳过 AT-SPI 验证, 由下面的 DB 验证替代
-    let has_db = state.db.is_some();
+    let db = state.db.load_full();
+    let has_db = db.is_some();
 
     // 在发送前订阅自发消息广播 (避免竞态: 发送期间的广播不会丢失)
-    let sent_rx = state.db.as_ref().map(|db| db.subscribe_sent());
+    let sent_rx = db.as_ref().map(|db| db.subscribe_sent());
 
     // 发送命令到 actor
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -881,11 +884,8 @@ async fn dispatch_text(
     match reply_rx.await {
         Ok(Ok((sent, atspi_verified, message))) => {
             // DB 验证 (优先): DB 可用时用已订阅的 receiver 等待匹配
-            let verified = if let Some(rx) = sent_rx {
-                state
-                    .db
-                    .as_ref()
-                    .unwrap()
+            let verified = if let (Some(rx), Some(db)) = (sent_rx, db.as_ref()) {
+                db
                     .verify_sent(&text, rx)
                     .await
                     .unwrap_or(atspi_verified)
@@ -915,13 +915,12 @@ async fn send_message_v2(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SendMessageV2Request>,
 ) -> Result<Json<MessageSendResponse>, ApiError> {
-    let conversation_id = state
-        .db
+    let db = state.db.load_full();
+    let conversation_id = db
         .as_ref()
         .map(|db| db.resolve_chat_identifier(&req.conversation))
         .unwrap_or_else(|| req.conversation.clone());
-    let conversation_name = state
-        .db
+    let conversation_name = db
         .as_ref()
         .map(|db| db.conversation_display_name(&conversation_id))
         .unwrap_or_else(|| req.conversation.clone());
@@ -1096,17 +1095,16 @@ async fn send_file(
         return Err(ApiError::internal(format!("写入临时文件失败: {error}")));
     }
 
-    let conversation_id = state
-        .db
+    let db = state.db.load_full();
+    let conversation_id = db
         .as_ref()
         .map(|db| db.resolve_chat_identifier(&req.to))
         .unwrap_or_else(|| req.to.clone());
-    let target = state
-        .db
+    let target = db
         .as_ref()
         .map(|db| db.conversation_display_name(&conversation_id))
         .unwrap_or_else(|| req.to.clone());
-    let sent_rx = state.db.as_ref().map(|db| db.subscribe_sent());
+    let sent_rx = db.as_ref().map(|db| db.subscribe_sent());
     let (reply_tx, reply_rx) = oneshot::channel();
     if state
         .input_tx
@@ -1132,11 +1130,8 @@ async fn send_file(
     match actor_result {
         Ok(Ok(Ok((sent, atspi_verified, message)))) => {
             let verified = if sent {
-                if let Some(receiver) = sent_rx {
-                    state
-                        .db
-                        .as_ref()
-                        .unwrap()
+                if let (Some(receiver), Some(db)) = (sent_rx, db.as_ref()) {
+                    db
                         .verify_sent(&name, receiver)
                         .await
                         .unwrap_or(atspi_verified)
@@ -1162,7 +1157,7 @@ async fn send_file(
 
 async fn get_sessions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // 优先使用数据库
-    if let Some(db) = &state.db {
+    if let Some(db) = state.db.load_full() {
         match db.get_sessions().await {
             Ok(sessions) => return Json(serde_json::to_value(sessions).unwrap_or_default()),
             Err(e) => {
@@ -1350,12 +1345,13 @@ async fn exec_command(
         "status" => {
             let status = state.wechat.check_status().await;
             let listen_list = state.wechat.get_listen_list().await;
-            let db_status = if state.db.is_some() {
+            let db = state.db.load_full();
+            let db_status = if db.is_some() {
                 "可用"
             } else {
                 "不可用"
             };
-            let contacts = if let Some(ref d) = state.db {
+            let contacts = if let Some(ref d) = db {
                 d.get_contacts().await.len()
             } else {
                 0
@@ -1622,7 +1618,7 @@ mod tests {
 /// 执行 send 命令
 async fn exec_send(state: &AppState, to: &str, text: &str) -> String {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    let has_db = state.db.is_some();
+    let has_db = state.db.load().is_some();
     if state
         .input_tx
         .send(InputCommand::SendMessage {
