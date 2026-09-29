@@ -169,21 +169,10 @@ For a group message, `conversation_id` identifies the group and `sender_id` iden
 
 ## How it works
 
-```mermaid
-flowchart LR
-    subgraph Container["Docker container"]
-        WX["WeChat Linux client"]
-        DB[("Local WCDB databases")]
-        Core["MimicWX API"]
-        Input["AT-SPI2 / X11"]
-        VNC["noVNC desktop"]
-        WX -->|Write messages| DB
-        DB -->|Read and parse| Core
-        Core -->|Send actions| Input --> WX
-        VNC -->|Login and desktop access| WX
-    end
-    Core <-->|REST / WebSocket| App["Application"]
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/architecture.en.dark.svg">
+  <img src="assets/architecture.en.svg" width="100%" alt="MimicWX architecture: message access, outbound text and files, and desktop sign-in">
+</picture>
 
 In database mode, the service reads local message changes for queries and events. Outbound operations use the WeChat UI and return send and verification results. noVNC provides login and desktop access; applications use HTTP or WebSocket.
 

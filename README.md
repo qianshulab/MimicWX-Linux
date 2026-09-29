@@ -169,21 +169,10 @@ curl --fail -X POST http://HOST:8899/messages/send \
 
 ## 工作原理
 
-```mermaid
-flowchart LR
-    subgraph Container["Docker 容器"]
-        WX["微信 Linux 客户端"]
-        DB[("本地 WCDB 数据库")]
-        Core["MimicWX API"]
-        Input["AT-SPI2 / X11"]
-        VNC["noVNC 桌面"]
-        WX -->|写入消息| DB
-        DB -->|读取与解析| Core
-        Core -->|发送操作| Input --> WX
-        VNC -->|登录与桌面操作| WX
-    end
-    Core <-->|REST / WebSocket| App["业务应用"]
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/architecture.zh-CN.dark.svg">
+  <img src="assets/architecture.zh-CN.svg" width="100%" alt="MimicWX 工作原理：消息接收、文本与文件发送、登录与桌面操作">
+</picture>
 
 数据库模式下，服务读取本地消息增量并提供查询和推送。发送操作由微信界面执行，返回值包含发送及验证结果。noVNC 用于登录和桌面操作，调用方通过 HTTP 或 WebSocket 访问服务。
 

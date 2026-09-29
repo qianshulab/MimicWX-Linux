@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1160" height="830" viewBox="0 0 1160 830" role="img" aria-labelledby="title desc" xml:lang="en">
+  <title id="title">From WeChat to your application</title>
+  <desc id="desc">Three paths share one Docker container. Receive: WeChat writes to local WCDB databases, MimicWX parses messages, and applications query or subscribe. Send: applications call the REST API, then MimicWX uses AT-SPI2 and X11 to operate WeChat. Login: a browser accesses the XFCE desktop through noVNC to sign in to WeChat.</desc>
+  <defs>
+    <marker id="receive-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1 8 5 1 9" fill="none" stroke="#087d63" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="send-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1 8 5 1 9" fill="none" stroke="#255cbe" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="login-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1 8 5 1 9" fill="none" stroke="#7652ab" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <rect width="1160" height="830" rx="20" fill="#ffffff"/>
+  <g font-family="Segoe UI, Microsoft YaHei, Noto Sans CJK SC, Arial, sans-serif">
+    <text x="44" y="54" font-size="31" font-weight="700" fill="#152a3a">From WeChat to your application</text>
+    <text x="44" y="87" font-size="18" fill="#52677b">Message access, outbound text and files, and desktop sign-in</text>
+    <rect x="24" y="116" width="832" height="618" rx="20" fill="#f6f9fc" stroke="#c6d2de" stroke-width="1.5" stroke-dasharray="7 6"/>
+    <text x="44" y="149" font-size="16" font-weight="700" letter-spacing="1.1" fill="#52677b">DOCKER CONTAINER</text>
+    <text x="884" y="149" font-size="16" font-weight="700" letter-spacing="1" fill="#52677b">EXTERNAL CLIENTS</text>
+    <path d="M44 344H1116M44 533H1116" fill="none" stroke="#e0e7ef" stroke-width="1.2"/>
+    <g aria-label="Receive messages">
+      <rect x="44" y="171" width="34" height="28" rx="7" fill="#e7f5ef"/>
+      <text x="61" y="191" text-anchor="middle" font-size="16" font-weight="700" fill="#087d63">01</text>
+      <text x="90" y="192" font-size="20" font-weight="600" fill="#087d63">Receive messages</text>
+      <text x="1116" y="192" text-anchor="end" font-size="17" fill="#52677b">REST queries · WebSocket events</text>
+      <g>
+        <rect x="44" y="215" width="232" height="108" rx="12" fill="#ffffff" stroke="#d5dfe9" stroke-width="1.3"/>
+        <g transform="translate(62 234)" fill="none" stroke="#087d63" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h22v16H14l-7 5v-5H4z"/><path d="M10 12h.01M15 12h.01M20 12h.01" stroke-width="3.5"/></g>
+        <text x="105" y="257" font-size="21" font-weight="600" fill="#152a3a">WeChat Linux</text>
+        <text x="62" y="295" font-size="16.5" fill="#52677b">Write local messages</text>
+      </g>
+      <path d="M286 269H314" fill="none" stroke="#087d63" stroke-width="2.5" stroke-linecap="round" marker-end="url(#receive-arrow)"/>
+      <g>
+        <rect x="324" y="215" width="232" height="108" rx="12" fill="#ffffff" stroke="#d5dfe9" stroke-width="1.3"/>
+        <g transform="translate(342 234)" fill="none" stroke="#087d63" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="15" cy="6" rx="11" ry="4"/><path d="M4 6v17c0 5 22 5 22 0V6M4 14c0 5 22 5 22 0"/></g>
+        <text x="385" y="257" font-size="21" font-weight="600" fill="#152a3a">Local WCDB</text>
+        <text x="342" y="295" font-size="16.5" fill="#52677b">Read stored messages</text>
+      </g>
+      <path d="M566 269H594" fill="none" stroke="#087d63" stroke-width="2.5" stroke-linecap="round" marker-end="url(#receive-arrow)"/>
+      <g>
+        <rect x="604" y="215" width="232" height="108" rx="12" fill="#ffffff" stroke="#d5dfe9" stroke-width="1.3"/>
+        <g transform="translate(622 234)" fill="none" stroke="#087d63" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m10 6-7 9 7 9m10-18 7 9-7 9M17 3l-4 24"/></g>
+        <text x="665" y="257" font-size="21" font-weight="600" fill="#152a3a">MimicWX API</text>
+        <text x="622" y="295" font-size="16.5" fill="#52677b">Parse and expose messages</text>
+      </g>
+      <path d="M846 269H874" fill="none" stroke="#087d63" stroke-width="2.5" stroke-linecap="round" marker-end="url(#receive-arrow)"/>
+      <g>
+        <rect x="884" y="215" width="232" height="108" rx="12" fill="#ffffff" stroke="#d5dfe9" stroke-width="1.3"/>
+        <g transform="translate(902 234)" fill="none" stroke="#087d63" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="10" height="10" rx="2"/><rect x="18" y="3" width="10" height="10" rx="2"/><rect x="3" y="18" width="10" height="10" rx="2"/><rect x="18" y="18" width="10" height="10" rx="2"/></g>
+        <text x="945" y="257" font-size="21" font-weight="600" fill="#152a3a">Application</text>
+        <text x="902" y="295" font-size="16.5" fill="#52677b">Knowledge base · Archive</text>
+      </g>
+    </g>
+    <g aria-label="Send text and files">
+      <rect x="44" y="360" width="34" height="28" rx="7" fill="#edf3ff"/>
+      <text x="61" y="380" text-anchor="middle" font-size="16" font-weight="700" fill="#255cbe">02</text>
+      <text x="90" y="381" font-size="20" font-weight="600" fill="#255cbe">Send text and files</text>
+      <text x="1116" y="381" text-anchor="end" font-size="17" fill="#52677b">REST requests</text>
+      <g>
+        <rect x="44" y="404" width="232" height="108" rx="12" fill="#ffffff" stroke="#d5dfe9" stroke-width="1.3"/>
+        <g transform="translate(62 423)" fill="none" stroke="#255cbe" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h22v16H14l-7 5v-5H4z"/><path d="M10 12h.01M15 12h.01M20 12h.01" stroke-width="3.5"/></g>
+        <text x="105" y="446" font-size="21" font-weight="600" fill="#152a3a">WeChat Linux</text>
+        <text x="62" y="484" font-size="16.5" fill="#52677b">Execute send actions</text>
+      </g>
+      <path d="M314 458H286" fill="none" stroke="#255cbe" stroke-width="2.5" stroke-linecap="round" marker-end="url(#send-arrow)"/>
+      <g>
+        <rect x="324" y="404" width="232" height="108" rx="12" fill="#ffffff" stroke="#d5dfe9" stroke-width="1.3"/>
+        <g transform="translate(342 423)" fill="none" stroke="#255cbe" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m7 3 18 15-10 1-5 9zM16 19l6 8"/></g>
+        <text x="385" y="446" font-size="21" font-weight="600" fill="#152a3a">AT-SPI2 / X11</text>
+        <text x="342" y="484" font-size="16.5" fill="#52677b">Operate the client UI</text>
+      </g>
+      <path d="M594 458H566" fill="none" stroke="#255cbe" stroke-width="2.5" stroke-linecap="round" marker-end="url(#send-arrow)"/>
+      <g>
+        <rect x="604" y="404" width="232" height="108" rx="12" fill="#ffffff" stroke="#d5dfe9" stroke-width="1.3"/>
+        <g transform="translate(622 423)" fill="none" stroke="#255cbe" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m10 6-7 9 7 9m10-18 7 9-7 9M17 3l-4 24"/></g>
+        <text x="665" y="446" font-size="21" font-weight="600" fill="#152a3a">MimicWX API</text>
+        <text x="622" y="484" font-size="16.5" fill="#52677b">Text and file requests</text>
+      </g>
+      <path d="M874 458H846" fill="none" stroke="#255cbe" stroke-width="2.5" stroke-linecap="round" marker-end="url(#send-arrow)"/>
+      <g>
+        <rect x="884" y="404" width="232" height="108" rx="12" fill="#ffffff" stroke="#d5dfe9" stroke-width="1.3"/>
+        <g transform="translate(902 423)" fill="none" stroke="#255cbe" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="10" height="10" rx="2"/><rect x="18" y="3" width="10" height="10" rx="2"/><rect x="3" y="18" width="10" height="10" rx="2"/><rect x="18" y="18" width="10" height="10" rx="2"/></g>
+        <text x="945" y="446" font-size="21" font-weight="600" fill="#152a3a">Application</text>
+        <text x="902" y="484" font-size="16.5" fill="#52677b">Replies and notifications</text>
+      </g>
+    </g>
+    <g aria-label="Sign in and use the desktop">
+      <rect x="44" y="549" width="34" height="28" rx="7" fill="#f3edfc"/>
+      <text x="61" y="569" text-anchor="middle" font-size="16" font-weight="700" fill="#7652ab">03</text>
+      <text x="90" y="570" font-size="20" font-weight="600" fill="#7652ab">Sign in and use the desktop</text>
+      <text x="1116" y="570" text-anchor="end" font-size="17" fill="#52677b">Browser connection</text>
+      <g>
+        <rect x="44" y="593" width="232" height="108" rx="12" fill="#ffffff" stroke="#d5dfe9" stroke-width="1.3"/>
+        <g transform="translate(62 612)" fill="none" stroke="#7652ab" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h22v16H14l-7 5v-5H4z"/><path d="M10 12h.01M15 12h.01M20 12h.01" stroke-width="3.5"/></g>
+        <text x="105" y="635" font-size="21" font-weight="600" fill="#152a3a">WeChat Linux</text>
+        <text x="62" y="673" font-size="16.5" fill="#52677b">QR / phone confirmation</text>
+      </g>
+      <path d="M314 647H286" fill="none" stroke="#7652ab" stroke-width="2.5" stroke-linecap="round" marker-end="url(#login-arrow)"/>
+      <g>
+        <rect x="324" y="593" width="232" height="108" rx="12" fill="#ffffff" stroke="#d5dfe9" stroke-width="1.3"/>
+        <g transform="translate(342 612)" fill="none" stroke="#7652ab" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="27" height="18" rx="2"/><path d="M15 21v6M8 27h14"/></g>
+        <text x="385" y="635" font-size="21" font-weight="600" fill="#152a3a">XFCE desktop</text>
+        <text x="342" y="673" font-size="16.5" fill="#52677b">WeChat graphical interface</text>
+      </g>
+      <path d="M594 647H566" fill="none" stroke="#7652ab" stroke-width="2.5" stroke-linecap="round" marker-end="url(#login-arrow)"/>
+      <g>
+        <rect x="604" y="593" width="232" height="108" rx="12" fill="#ffffff" stroke="#d5dfe9" stroke-width="1.3"/>
+        <g transform="translate(622 612)" fill="none" stroke="#7652ab" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="27" height="25" rx="3"/><path d="M2 11h27M8 7h.01M13 7h.01" /></g>
+        <text x="665" y="635" font-size="21" font-weight="600" fill="#152a3a">noVNC</text>
+        <text x="622" y="673" font-size="16.5" fill="#52677b">Browser desktop access</text>
+      </g>
+      <path d="M874 647H846" fill="none" stroke="#7652ab" stroke-width="2.5" stroke-linecap="round" marker-end="url(#login-arrow)"/>
+      <g>
+        <rect x="884" y="593" width="232" height="108" rx="12" fill="#ffffff" stroke="#d5dfe9" stroke-width="1.3"/>
+        <g transform="translate(902 612)" fill="none" stroke="#7652ab" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="27" height="25" rx="3"/><path d="M2 11h27M8 7h.01M13 7h.01" /></g>
+        <text x="945" y="635" font-size="21" font-weight="600" fill="#152a3a">Browser</text>
+        <text x="902" y="673" font-size="16.5" fill="#52677b">Sign-in and desktop access</text>
+      </g>
+    </g>
+    <text x="44" y="773" font-size="17" fill="#52677b">The same components appear in each path. WCDB data and local files persist in mounted directories.</text>
+    <text x="44" y="803" font-size="17" fill="#64788b">QR / phone approval is a user action. File downloads serve attachments already saved by WeChat.</text>
+  </g>
+</svg>
