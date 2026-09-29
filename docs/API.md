@@ -4,7 +4,7 @@
 >
 > 中文版本：[API.zh-CN.md](API.zh-CN.md)
 
-This document describes the v0.6 HTTP and WebSocket interface for using WeChat as a bidirectional data channel. Consumers can ingest messages and files, preserve conversation and sender identity, and send processing results back to the originating chat.
+MimicWX exposes WeChat messages, conversation metadata, local attachments, and client-driven sending through HTTP and WebSocket. This reference covers the v0.6 interface and its integration constraints.
 
 ## Contents
 
@@ -24,7 +24,7 @@ This document describes the v0.6 HTTP and WebSocket interface for using WeChat a
 | `GET` | `/status` | No | Service, login, database, and cursor status |
 | `GET` | `/contacts` | Yes | Contacts from the decrypted database |
 | `GET` | `/sessions` | Yes | Current conversations |
-| `GET` | `/messages` | Yes | Independent-cursor real-time buffer |
+| `GET` | `/messages` | Yes | Real-time buffer with client-managed cursors |
 | `GET` | `/messages/history` | Yes | Database history catch-up |
 | `GET` | `/attachments/{id}` | Yes | Attachment stream with Range support |
 | `POST` | `/messages/send` | Yes | Send text to a conversation |
@@ -40,8 +40,9 @@ This document describes the v0.6 HTTP and WebSocket interface for using WeChat a
 - Timestamps: Unix seconds
 - Maximum page size: 500 messages
 - Maximum outbound text: 64 KiB
-- Maximum outbound file: 100 MiB after Base64 decoding
-- API errors use an HTTP status code and a JSON body such as `{"error":"reason"}`.
+- JSON request body limit: 2 MiB in the default server configuration, including Base64 data and JSON overhead
+- Outbound file validation limit: 100 MiB after Base64 decoding; the smaller JSON request limit currently takes precedence
+- Handler errors generally use `{"error":"reason"}`. Authentication and request-extraction errors may have an empty or plain-text body; check the HTTP status before parsing JSON.
 
 Common status codes:
 
@@ -50,25 +51,28 @@ Common status codes:
 | `400` | Invalid input, pagination, file name, Base64 data, or size limit |
 | `401` | Missing or invalid API Token |
 | `404` | Unknown recent message or unavailable attachment |
+| `413` | Request body exceeds the server or reverse-proxy limit |
 | `416` | Invalid or unsatisfiable attachment Range |
 | `500` | Internal processing or I/O failure |
 | `503` | Database or input engine is not currently available |
 
-Except for `GET /status`, every endpoint requires the configured token:
+Set a non-empty `[api].token` in the application configuration to enable authentication. With a token configured, every endpoint except `GET /status` requires:
 
 ```http
 Authorization: Bearer YOUR_API_TOKEN
 ```
 
+An absent or empty token disables authentication. The endpoint index assumes authentication is enabled.
+
 For WebSocket clients that cannot set an authorization header, use `ws://HOST:8899/ws?token=YOUR_URL_ENCODED_TOKEN`. Query-string authentication can leak through URLs and logs, so prefer a header and TLS-capable reverse proxy whenever possible.
 
 ## 2. Message identity model
 
-Every database message includes both conversation identity and sender identity. Do not use a display name as a primary key.
+Database message records distinguish the conversation from the sender. Use IDs for storage and routing; display names can change and need not be unique.
 
 | Field | Meaning |
 | --- | --- |
-| `message_id` | Stable deduplication/reply ID. It normally uses the WeChat server message ID. |
+| `message_id` | Deduplication/reply ID: `wx:<server_id>` when available; otherwise `local:<hash>` derived from the conversation, local row ID, and creation time. |
 | `conversation_id` | Chat identity. For a private chat this identifies the contact; for a group it identifies the group. |
 | `conversation_name` | Current display name of the chat. |
 | `sender_id` | Actual message sender. In a group this identifies the member who spoke. |
@@ -120,7 +124,9 @@ No authentication is required. A service should only ingest messages when `statu
 }
 ```
 
-`message_cursor` is process-local. It resets when the service restarts. Use `uptime_secs` or an independently stored instance marker/timestamp to detect a restart and fall back to history catch-up.
+The API starts before login and database initialization. A successful HTTP response confirms that the status endpoint is reachable. `db_available=true` means the database manager has been initialized; it is not a fresh validation of every database or attachment.
+
+`message_cursor` is process-local and resets when the service restarts. The API does not expose a persistent instance ID. A decreased cursor or uptime can indicate a restart, but clients should perform history catch-up after every reconnect rather than rely on these values alone.
 
 ### `GET /contacts`
 
@@ -134,13 +140,13 @@ Returns the current WeChat session list. This endpoint is useful for discovery; 
 
 ### WebSocket `/ws`
 
-The WebSocket stream is the lowest-latency interface. Database events have `type: "db_message"` and otherwise contain the same fields as an item returned by `GET /messages`, including `cursor`.
+Database events have `type: "db_message"` and otherwise contain the same fields as an item returned by `GET /messages`, including `cursor`. Other event types may also appear; filter by `type` before processing database messages.
 
 The server sends a WebSocket Ping every 30 seconds. Clients must reconnect with exponential backoff and deduplicate with `message_id`. The WebSocket stream does not replay missed events by itself.
 
 ### `GET /messages`
 
-Returns the in-memory real-time buffer without consuming messages globally. Every caller owns an independent cursor.
+Returns up to the latest 4,096 database messages held in memory. Each caller stores its own cursor; reading messages does not remove them for other callers. The server does not persist client cursors or acknowledgements.
 
 Query parameters:
 
@@ -169,7 +175,9 @@ Query parameters:
 }
 ```
 
-Persist `next_cursor` only for the lifetime of the same service process. If `has_more` is true, request the next page immediately.
+Use `after=next_cursor` for the next request to the same service process. If `has_more` is true, request the next page immediately. If no messages match the filters, `next_cursor` stays unchanged.
+
+Old entries are discarded when the buffer fills, and all entries are lost on restart. `has_more=false` means no further matching entries are currently buffered; it does not establish that the caller has received every message. Use history catch-up after an interruption or when the buffer may have overrun.
 
 ### `GET /messages/history`
 
@@ -180,7 +188,7 @@ Query parameters:
 | Parameter | Default | Description |
 | --- | ---: | --- |
 | `since` | `0` | Inclusive Unix timestamp. Keep it unchanged while paging. |
-| `offset` | `0` | Stable offset for this exact `since` value; maximum 100000. |
+| `offset` | `0` | Offset for the same `since` value and filters; maximum 100000. |
 | `limit` | `100` | 1–500. |
 | `chat` | unset | Match conversation ID or name. |
 | `sender` | unset | Match sender ID or name. |
@@ -188,9 +196,11 @@ Query parameters:
 
 Results are ordered from oldest to newest. The response contains `messages`, `next_offset`, `checkpoint_time`, the compatibility alias `next_since`, and `has_more`. Keep the original `since` fixed and request the next page with `offset=next_offset` until `has_more=false`. Optional sender/direction filters are applied after scanning a base page, so a page can contain fewer than `limit` messages or even be empty while `has_more=true`.
 
-After the final page, persist `checkpoint_time` as the next run's inclusive `since`. Always deduplicate by `message_id`: several messages can share the same second, and a crash after processing but before saving the checkpoint intentionally causes safe replay.
+After the final page has been processed durably, persist `checkpoint_time` as the next run's inclusive `since`. Deduplicate by `message_id`: several messages can share the same second, and a crash between processing and checkpointing can replay them.
 
-### Recommended reliable consumer flow
+History is limited to messages retained in the local WeChat database. Pagination is not a database snapshot; delayed synchronization or deletion can change results between requests. Use an overlapping time window when catching up and deduplicate the overlap. This endpoint does not recover records absent from the local client.
+
+### Consumer checkpoints and recovery
 
 1. Persist every processed `message_id` and the latest `create_time` in the consuming service.
 2. Connect the WebSocket and temporarily buffer live events.
@@ -199,7 +209,7 @@ After the final page, persist `checkpoint_time` as the next run's inclusive `sin
 5. Continue consuming WebSocket events; periodically checkpoint `create_time` and processed IDs.
 6. After a disconnect or service restart, repeat from step 2.
 
-This provides at-least-once delivery semantics. MimicWX persists only database table watermarks, not plaintext messages; the consuming service remains responsible for durable business-level deduplication.
+This is a client-side recovery strategy, not an at-least-once delivery guarantee. MimicWX persists database scan watermarks, but the API has no durable event queue or consumer acknowledgements. Recovery depends on the messages remaining available in the local WeChat database. The consumer is responsible for durable storage, checkpoints, and idempotent processing.
 
 `GET /messages/new` remains available for old clients. Its no-parameter mode is a single shared consumer and should not be used for new multi-consumer integrations.
 
@@ -227,7 +237,9 @@ Streams the file as `application/octet-stream`. The response forces download, se
 
 The opaque ID contains file metadata, not a server path. Resolution is restricted to the active WeChat account's approved attachment directories; path traversal and symbolic-link escapes are rejected.
 
-`available: false` means WeChat has not yet written a matching local file. The client may retry the download endpoint because availability is checked again on every request. Executable and archive attachments are returned only as bytes; MimicWX never executes them. Consumers should apply their own file-size limit, malware scanning, content-type detection, and sandboxed parsing before indexing.
+`available: false` means no matching local file was resolved. The file may not have been downloaded, may have been removed, or may not match the message metadata. The endpoint rechecks availability on every request, but does not instruct WeChat to download the file. Retry after the file is available in the WeChat client.
+
+This endpoint serves parsed file messages. It does not provide a general download mechanism for image, voice, video, link, or mini-program content. Office documents, archives, APKs, and executables can be returned as bytes when their local files are available; the endpoint does not execute them. Consumers should apply file-size limits, content-type detection, scanning, and sandboxed parsing before indexing.
 
 Example:
 
@@ -267,6 +279,8 @@ Response:
 
 Use unique WeChat remarks when two chats have the same display name, because the Linux client UI ultimately opens a conversation by its visible search result.
 
+`at` contains group members' display names, not their IDs. `sent` reports the result of the client send operation; `verified` reports confirmation from local database events or accessibility inspection. Neither is a recipient delivery/read receipt. Sending endpoints do not accept an idempotency key: retrying after a timeout can send the message again.
+
 ### `POST /messages/reply`
 
 Reply to the original conversation of a recent real-time message:
@@ -279,7 +293,7 @@ Reply to the original conversation of a recent real-time message:
 }
 ```
 
-For a group message, `mention_sender: true` automatically mentions the originating group member. The referenced message must still be present in the process's live buffer. If it is not, use the persisted `conversation_id` with `/messages/send` and explicitly populate `at` when needed.
+`mention_sender` defaults to `true`. For an incoming group message with a resolved sender name, it requests a mention of that member. The referenced message must still be present in the process's live buffer. If it is not, use the persisted `conversation_id` with `/messages/send` and explicitly populate `at` when needed. This endpoint routes a new message to the original conversation; it does not create a native WeChat quoted reply.
 
 ### `POST /messages/send-file`
 
@@ -293,7 +307,9 @@ Alias: `POST /send_file`.
 }
 ```
 
-The decoded file is limited to 100 MiB, written with owner-only permissions, selected through WeChat's native file chooser, and deleted after a grace period. File names containing path separators or control characters are rejected.
+The handler validates a maximum decoded size of 100 MiB, but the current default JSON body limit is 2 MiB. Base64 and JSON overhead reduce the effective file size to slightly less than 1.5 MiB; a reverse proxy can impose a lower limit. The request-body limit is inherited from [Axum's default configuration](https://docs.rs/axum/0.8/axum/extract/struct.DefaultBodyLimit.html).
+
+Files are written with owner-only permissions, selected through WeChat's native file chooser, and deleted after a grace period. File names containing path separators or control characters are rejected. There is no multipart or streaming upload endpoint.
 
 ### Compatibility endpoints
 
@@ -324,14 +340,14 @@ async def run():
                 event = json.loads(frame.data)
                 if event.get("type") != "db_message":
                     continue
-                # Enqueue by message_id, preserve conversation_id/sender_id,
-                # Download an attachment if present, then dispatch downstream.
                 print(event["message_id"], event["conversation_id"], event["sender_id"])
 
 asyncio.run(run())
 ```
 
-Production consumers should implement the history/bootstrap flow above, durable deduplication, bounded queues, retry/backoff, observability, and a dead-letter path for messages or files that cannot be processed.
+This example prints live events only. It does not implement reconnects, history catch-up, or durable checkpoints. Integrations should implement those behaviors, use bounded queues, and retain failed processing tasks for retry or review.
+
+Filter or separately archive `direction=outgoing` to avoid consuming the application's own replies. Store the source `message_id`, `conversation_id`, `sender_id`, processing result, and send status together. Reconcile uncertain sends before retrying; local task deduplication alone cannot make an external send idempotent.
 
 ## 8. Security notes
 

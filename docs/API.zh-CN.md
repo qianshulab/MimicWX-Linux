@@ -4,7 +4,7 @@
 >
 > English: [API.md](API.md)
 
-本文档对应 v0.6，说明如何通过 HTTP 与 WebSocket 接收微信文本和文件、保留“会话/发送者”关系，并把处理结果回复到原聊天。
+MimicWX 通过 HTTP 与 WebSocket 提供微信消息、会话信息、本地附件访问和客户端发送能力。本参考适用于 v0.6 接口，包含请求格式、返回字段和集成限制。
 
 ## 目录
 
@@ -23,7 +23,7 @@
 | `GET` | `/status` | 否 | 服务、登录、数据库和游标状态 |
 | `GET` | `/contacts` | 是 | 已解密数据库中的联系人 |
 | `GET` | `/sessions` | 是 | 当前会话 |
-| `GET` | `/messages` | 是 | 多调用方独立游标实时缓存 |
+| `GET` | `/messages` | 是 | 由调用方管理游标的实时缓存 |
 | `GET` | `/messages/history` | 是 | 数据库历史补拉 |
 | `GET` | `/attachments/{id}` | 是 | 支持 Range 的附件流 |
 | `POST` | `/messages/send` | 是 | 向会话发送文本 |
@@ -39,8 +39,9 @@
 - 时间：Unix 秒
 - 分页上限：500 条
 - 发出文本上限：64 KiB
-- 发出文件上限：Base64 解码后 100 MiB
-- 错误格式：`{"error":"错误原因"}`
+- 默认 JSON 请求体上限：2 MiB，包含 Base64 数据和 JSON 结构
+- 文件处理层校验上限：Base64 解码后 100 MiB；当前实际请求先受较小的 JSON 请求体限制
+- 业务处理错误通常返回 `{"error":"错误原因"}`。认证和请求解析错误可能返回空响应或纯文本，应先检查 HTTP 状态，再解析 JSON。
 
 常见状态码：
 
@@ -49,25 +50,28 @@
 | `400` | 输入、分页、文件名、Base64 数据或大小限制无效 |
 | `401` | API Token 缺失或无效 |
 | `404` | 近期消息不存在或附件尚不可用 |
+| `413` | 请求体超过服务端或反向代理限制 |
 | `416` | 附件 Range 无效或超出范围 |
 | `500` | 内部处理或 I/O 失败 |
 | `503` | 数据库或输入引擎当前不可用 |
 
-除 `GET /status` 外，接口均需携带：
+在应用配置中设置非空的 `[api].token` 后，除 `GET /status` 外的接口均需携带：
 
 ```http
 Authorization: Bearer YOUR_API_TOKEN
 ```
 
+Token 未配置或为空时，认证不会启用。端点索引中的认证要求以已启用 Token 为前提。
+
 无法设置请求头的 WebSocket 客户端可使用 `?token=URL编码后的Token`，但生产环境更建议用请求头，并在可信局域网或带 TLS 的反向代理后使用。
 
 ## 消息身份字段
 
-每条消息都明确区分聊天对象和实际发言人：
+数据库消息记录区分所属会话和实际发送者。存储与路由应使用 ID；显示名可能变化，也可能重复。
 
 | 字段 | 含义 |
 | --- | --- |
-| `message_id` | 稳定消息 ID，用于去重和回复。优先使用微信 server ID。 |
+| `message_id` | 去重和回复 ID。优先使用 `wx:<server_id>`；不可用时使用会话、本地记录 ID 与创建时间派生的 `local:<hash>`。 |
 | `conversation_id` | 所属会话 ID；私聊为联系人，群聊为群。 |
 | `conversation_name` | 会话当前显示名。 |
 | `sender_id` | 实际发送者 ID；群聊中为具体群成员。 |
@@ -101,7 +105,9 @@ Authorization: Bearer YOUR_API_TOKEN
 }
 ```
 
-只有登录状态正常且 `db_available=true` 时，才应启动消息消费。`message_cursor` 只在本次进程运行期间有效，进程重启后必须依靠历史接口补拉。
+消息消费前应确认登录状态正常且 `db_available=true`。API 先于登录和数据库初始化启动，HTTP 请求成功仅表示状态接口可以响应。`db_available=true` 表示数据库管理器已经初始化，并不代表本次请求重新验证了所有数据库和附件。
+
+`message_cursor` 只在本次进程运行期间有效，重启后会重置。API 不提供持久化实例 ID；游标或运行时长变小可作为重启线索，但不能单独作为判断依据。调用方每次重连后都应通过历史接口补拉。
 
 ### `GET /contacts`
 
@@ -115,7 +121,7 @@ Authorization: Bearer YOUR_API_TOKEN
 
 ### WebSocket `/ws`
 
-数据库消息事件的 `type` 为 `db_message`，其余字段与 `/messages` 中的消息项相同，并额外带实时 `cursor`。服务每 30 秒发送 Ping。
+数据库消息事件的 `type` 为 `db_message`，其余字段与 `/messages` 中的消息项相同，包含实时 `cursor`。WebSocket 还可能包含其他类型事件，处理数据库消息前应按 `type` 过滤。服务每 30 秒发送 Ping，连接本身不提供历史重放。
 
 客户端要求：
 
@@ -126,7 +132,7 @@ Authorization: Bearer YOUR_API_TOKEN
 
 ### `GET /messages`
 
-读取进程内实时缓存。每个调用方保存自己的 `after`，不会抢走其他调用方的消息。
+读取进程内最近最多 4,096 条数据库消息。每个调用方保存自己的 `after`，读取不会删除其他调用方可见的消息。服务端不持久化客户端游标，也不记录消费确认。
 
 | 参数 | 默认值 | 说明 |
 | --- | ---: | --- |
@@ -145,7 +151,9 @@ Authorization: Bearer YOUR_API_TOKEN
 }
 ```
 
-同一次进程运行中，下次请求传 `after=next_cursor`。`has_more=true` 时立即翻页。
+同一次进程运行中，下次请求传 `after=next_cursor`。`has_more=true` 时立即翻页；没有匹配消息时，`next_cursor` 保持不变。
+
+缓存满后会移除最旧的消息，进程重启会清空全部缓存。`has_more=false` 只表示当前缓存中没有更多匹配项，不代表已经收齐全部消息。连接中断或可能超出缓存容量时，应通过历史接口补拉。
 
 ### `GET /messages/history`
 
@@ -154,7 +162,7 @@ Authorization: Bearer YOUR_API_TOKEN
 | 参数 | 默认值 | 说明 |
 | --- | ---: | --- |
 | `since` | `0` | 起始 Unix 秒，包含该秒；一轮分页期间保持不变。 |
-| `offset` | `0` | 此 `since` 结果集内的稳定偏移，最大 100000。 |
+| `offset` | `0` | 相同 `since` 和过滤条件下的结果偏移，最大 100000。 |
 | `limit` | `100` | 1–500。 |
 | `chat` | 无 | 会话 ID/名称。 |
 | `sender` | 无 | 发送者 ID/名称。 |
@@ -162,9 +170,11 @@ Authorization: Bearer YOUR_API_TOKEN
 
 结果按时间从旧到新排列。响应包含 `messages`、`next_offset`、`checkpoint_time`、兼容字段 `next_since` 和 `has_more`。分页时固定原始 `since`，使用返回的 `next_offset` 继续请求，直到 `has_more=false`。`sender`/`direction` 等可选过滤是在基础页扫描后应用，因此返回数量可能少于 `limit`，甚至本页为空但 `has_more=true`，仍需继续翻页。
 
-最后一页完成后，把 `checkpoint_time` 持久化为下一轮包含式 `since`。同一秒可能有多条消息，程序崩溃后也可能安全重放，所以始终按 `message_id` 去重。
+最后一页的处理结果持久化后，把 `checkpoint_time` 保存为下一轮包含式 `since`。同一秒可能有多条消息；处理完成但检查点尚未保存时发生崩溃，也会导致重复读取，因此需始终按 `message_id` 去重。
 
-### 推荐的可靠消费流程
+历史接口只能查询本地微信数据库中仍保留的消息。分页不是数据库快照，延迟同步或删除操作可能使分页期间的结果变化。补拉时可保留一段重叠时间窗口，并对重叠记录去重；本地客户端没有保存的记录无法通过此接口恢复。
+
+### 消费检查点与恢复
 
 1. 消费方持久化已处理的 `message_id` 和最新 `create_time`。
 2. 先建立 WebSocket 并暂存实时事件。
@@ -173,7 +183,7 @@ Authorization: Bearer YOUR_API_TOKEN
 5. 正常持续接收，并定期持久化处理水位。
 6. 断线或 MimicWX 重启后回到第 2 步。
 
-这形成至少一次投递语义：宁可重复，不静默丢失。MimicWX 只在本地持久化数据库表水位，不额外落盘明文消息；业务级持久化和幂等由消费方负责。
+这是客户端恢复策略，不构成至少一次投递保证。MimicWX 持久化数据库扫描水位，但 API 不提供持久化事件队列或消费确认。补拉依赖消息仍保留在本地微信数据库中；业务数据持久化、检查点和幂等处理由调用方负责。
 
 旧接口 `GET /messages/new` 继续兼容，但无参数时为共享单消费者，不建议新系统使用。
 
@@ -199,7 +209,9 @@ Authorization: Bearer YOUR_API_TOKEN
 
 附件 ID 是不含服务器路径的元数据定位符。后端只允许在当前微信账号的附件白名单目录中查找，并拒绝路径穿越、软链接逃逸和不匹配的文件。
 
-`available=false` 表示微信暂未把文件写入本地；下载接口每次都会重新解析，因此调用方可以退避重试。Office 文档、ZIP、APK、EXE 等均只作为字节返回，MimicWX 不执行它们。下游系统应在处理前执行大小限制、哈希记录、病毒扫描、真实文件类型识别和沙箱解析。
+`available=false` 表示未找到匹配的本地文件。文件可能尚未下载、已经删除，或无法与消息元数据匹配。下载接口每次都会重新检查，但不会触发微信下载；应在微信客户端中确认文件已下载后再重试。
+
+此端点适用于解析为文件类型的消息，不是图片、语音、视频、链接或小程序内容的通用下载接口。Office 文档、ZIP、APK、EXE 等文件在本地可用时可按字节返回，端点不会执行文件。下游系统应在处理前执行大小限制、内容类型识别、扫描和沙箱解析。
 
 ```bash
 curl --fail --location \
@@ -220,7 +232,22 @@ curl --fail --location \
 }
 ```
 
-响应会返回解析后的 `conversation_id`、`conversation_name`、`sent` 和 `verified`。若存在同名聊天，建议在微信中设置唯一备注；底层 Linux 客户端最终仍需通过可见搜索结果打开会话。
+响应示例：
+
+```json
+{
+  "sent": true,
+  "verified": true,
+  "message": "sent",
+  "conversation_id": "wxid_or_group_id",
+  "conversation_name": "联系人 A",
+  "reply_to_message_id": null
+}
+```
+
+即使传入 `conversation_id`，底层 Linux 客户端最终仍通过显示名对应的搜索结果打开会话。同名聊天应在微信中设置唯一备注。
+
+`at` 接收群成员的显示名，不是成员 ID。`sent` 表示客户端发送操作结果，`verified` 表示本地数据库事件或无障碍接口的确认结果；二者均不是收件人送达或已读回执。发送接口不支持幂等键，超时后直接重试可能重复发送。
 
 ### `POST /messages/reply`
 
@@ -232,7 +259,7 @@ curl --fail --location \
 }
 ```
 
-它会把结果发回消息所属会话；群聊默认 @ 原发送者。目标消息必须仍在当前进程的实时缓存中。若服务已重启或消息过旧，请使用业务侧保存的 `conversation_id` 调用 `/messages/send`，群聊需要时显式填写 `at`。
+`mention_sender` 默认为 `true`。对于收到的群消息，发送者名称可解析时会请求 @ 该成员。目标消息必须仍在当前进程的实时缓存中。若服务已重启或消息过旧，使用业务侧保存的 `conversation_id` 调用 `/messages/send`，群聊需要时显式填写 `at`。此接口向原会话发送一条新消息，不生成微信原生引用回复。
 
 ### `POST /messages/send-file`
 
@@ -246,7 +273,9 @@ curl --fail --location \
 }
 ```
 
-文件以 0600 权限写入临时目录，通过微信原生文件选择器交给微信，保留一段时间供微信异步读取后删除。文件名含路径分隔符、控制字符或目录穿越形式时会被拒绝。
+处理函数校验解码后文件不超过 100 MiB，但当前默认 JSON 请求体限制为 2 MiB。计入 Base64 与 JSON 开销后，实际文件需略小于 1.5 MiB；反向代理还可能施加更小的限制。请求体上限来自 [Axum 默认配置](https://docs.rs/axum/0.8/axum/extract/struct.DefaultBodyLimit.html)。
+
+文件以 0600 权限写入临时目录，通过微信原生文件选择器交给微信，保留一段时间供微信异步读取后删除。文件名含路径分隔符、控制字符或目录穿越形式时会被拒绝。目前没有 multipart 或流式上传接口。
 
 兼容接口：
 
@@ -262,8 +291,8 @@ curl --fail --location \
 - 对 `direction=outgoing` 做过滤或单独归档，避免机器人消费自己的回复形成循环。
 - 先把消息放入持久化队列，再异步下载和解析附件。
 - 记录附件哈希，不按扩展名信任内容类型。
-- 回复时保存原 `message_id`、业务任务 ID 和回复状态，保证重试幂等。
+- 保存原 `message_id`、`conversation_id`、`sender_id`、处理结果和发送状态；发送结果不确定时，先核对再重试。业务任务去重不能单独保证微信发送幂等。
 - 对发送设置速率限制和人工兜底，避免异常循环刷屏。
 - 不要把 API/noVNC 直接暴露到公网；Token、微信数据和附件备份均按敏感数据保护。
 
-英文版及 Python 客户端示例见 [API.md](API.md)。
+英文版及 Python 客户端示例见 [API.md](API.md)。示例仅打印实时事件，不包含重连、历史补拉和检查点持久化；实际集成需实现这些行为，并保留失败任务供重试或人工处理。

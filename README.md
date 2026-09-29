@@ -1,115 +1,63 @@
 <p align="center">
-  <img src="assets/readme-banner.svg" width="100%" alt="MimicWX-Linux — Linux 微信消息与文件双向桥接服务">
+  <img src="assets/readme-banner.svg" width="100%" alt="MimicWX-Linux — Linux 微信消息与文件接口">
 </p>
 
 <p align="center">
-  <strong>把微信 Linux 客户端转换为可编程、可追踪、可双向通信的数据通道。</strong>
+  <strong>自托管的微信消息与文件桥接服务，提供 REST API 和 WebSocket 接口。</strong>
 </p>
 
 <p align="center">
   <a href="README.md">简体中文</a> ·
   <a href="README.en.md">English</a> ·
-  <a href="docs/README.md">文档中心</a> ·
+  <a href="docs/DEPLOYMENT.zh-CN.md">部署指南</a> ·
   <a href="docs/API.zh-CN.md">API 参考</a> ·
   <a href="CHANGELOG.md">更新日志</a>
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2563eb?style=flat-square" alt="MIT License"></a>
-  <img src="https://img.shields.io/badge/version-0.6.1-0f766e?style=flat-square" alt="Version 0.6.1">
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.6.1-0f766e?style=flat-square" alt="Version 0.6.1"></a>
   <img src="https://img.shields.io/badge/platform-Linux%20x86__64-f59e0b?style=flat-square" alt="Linux x86-64">
   <img src="https://img.shields.io/badge/core-Rust-ce422b?style=flat-square" alt="Rust">
-  <a href="https://github.com/qianshulab/MimicWX-Linux/commits/main"><img src="https://img.shields.io/github/last-commit/qianshulab/MimicWX-Linux?style=flat-square" alt="Last commit"></a>
 </p>
 
-MimicWX-Linux 在容器中运行官方微信 Linux 客户端，通过 WCDB 本地数据库解析、AT-SPI2 与 X11 自动化能力，对外提供 REST 和 WebSocket 接口。调用方可以实时接收消息、下载附件、识别会话与实际发送者，并把文本或文件回复到对应聊天。
+MimicWX-Linux 将微信 Linux 客户端接入消息归档、知识库和自动化应用。应用可通过接口接收消息、识别会话与发送者、下载文件，并向指定会话发送文本或文件。
 
-> [!IMPORTANT]
-> MimicWX-Linux 不是微信官方 API，也不隶属于腾讯或微信团队。项目依赖微信 Linux 客户端的界面和本地数据格式，客户端升级可能影响兼容性。请仅处理已获授权的账号和数据，并遵守适用法律、隐私要求与平台规则。
+服务使用 Rust 编写，通过本地 WCDB 数据库读取消息，通过 AT-SPI2 与 X11 操作微信客户端。Docker Compose 包含微信、虚拟桌面、noVNC 和 API 服务。
 
-## 为什么选择 MimicWX-Linux
+> [!NOTE]
+> 本项目为非官方实现，与腾讯及微信团队无隶属关系。兼容性取决于微信 Linux 客户端的界面和数据库格式。
 
-| 目标 | 提供的能力 |
-| --- | --- |
-| 可靠接收 | WebSocket 实时推送、独立消费游标、数据库历史补拉与稳定消息 ID |
-| 正确路由 | 明确区分会话、群聊和实际发送者，避免依赖可能重复或变化的显示名 |
-| 文件闭环 | 接收并下载文档、压缩包、APK、EXE 等附件，也可向指定会话发送文件 |
-| 双向交互 | 按会话发送文本，或按消息 ID 回复；群聊可自动提及原发送者 |
-| 自动解密 | 兼容微信 4.0 内存扫描，支持微信 4.1 登录捕获、逐库派生、HMAC 校验与轮换更新 |
-| 隔离部署 | 微信、虚拟桌面、noVNC 和服务端集中在容器中，运行数据与镜像分离 |
+[功能](#功能) · [快速开始](#快速开始) · [接口接入](#接口接入) · [工作原理](#工作原理) · [兼容性与限制](#兼容性与限制)
 
-典型用途包括消息归档、知识库采集、自动化工作流、通知与回执、机器人适配器，以及需要以微信作为数据入口或输出通道的内部系统。
+## 功能
 
-## 功能概览
-
-### 消息与身份
-
-- 解析文本、图片、语音、视频、文件、名片、位置、链接和小程序等常见消息类型。
-- 每条消息提供稳定 `message_id`、`conversation_id`、`sender_id`、`direction` 与 `is_group`。
-- 私聊和群聊使用同一套消息模型；群消息保留具体成员身份。
-- 历史接口按时间与偏移分页，实时接口为每个调用方维护独立游标。
-
-### 附件与发送
-
-- 附件通过受认证接口流式下载，支持单段 HTTP Range 断点续传。
-- 附件 ID 不暴露宿主机路径，并限制在当前账号的允许目录中解析。
-- 支持向会话发送文本、图片和 Base64 文件；单个发送文件最大 100 MiB。
-- 支持按实时消息 ID 回复原会话，并在群聊中提及原发送者。
-
-### 运行与恢复
-
-- AT-SPI2 总线重连、失效节点重建和发送结果数据库验证。
-- 微信 4.1 口令监听、数据库密钥逐库派生及 page-1 HMAC 验证。
-- 新数据库发现、密钥映射原子更新与连接热重建。
-- Compose 健康检查、日志轮转、持久化目录和 Docker secret。
-
-## 架构
-
-```mermaid
-flowchart LR
-    Consumer[业务系统 / 自动化工作流]
-
-    subgraph Container[Docker Container]
-        API[REST + WebSocket]
-        Core[MimicWX Core]
-        DB[(WeChat WCDB)]
-        Driver[AT-SPI2 + X11]
-        WX[WeChat Linux]
-        Desktop[XFCE + noVNC]
-    end
-
-    Consumer <--> API
-    API <--> Core
-    Core <--> DB
-    Core --> Driver --> WX
-    WX --> DB
-    Desktop --> WX
-```
-
-接收链路以本地数据库增量为准，发送链路通过微信客户端完成并在数据库侧验证。界面自动化不承担主要消息读取职责，降低界面结构变化对接收链路的影响。
+- **消息接收**：WebSocket 实时事件、带游标的消息查询，以及按会话和时间查询本地历史记录。
+- **身份识别**：消息包含 `message_id`、`conversation_id` 和 `sender_id`，区分私聊联系人、群聊和群成员。
+- **内容解析**：提供文本、链接、公众号分享、文件、图片、语音、视频、名片、位置和小程序等消息的结构化字段。媒体元数据解析不等同于媒体文件下载。
+- **文件传输**：下载微信已保存到本地的文件，支持单段 HTTP Range；通过接口向会话发送 Base64 编码的文件。
+- **消息发送**：按会话发送文本，或按实时缓存中的消息 ID 回复原会话；群聊回复可提及原发送者。
+- **密钥管理**：包含微信 4.0 内存扫描和 4.1 登录捕获两条提取路径，支持逐库派生、HMAC 校验和密钥映射更新。
+- **运行恢复**：容器自动重启、关键进程监测、API 健康检查、日志轮转和微信数据持久化。
 
 ## 快速开始
 
-### 前置条件
+### 环境要求
 
-- x86-64 Linux 主机
-- Docker Engine 24+ 与 Docker Compose v2
-- 至少 2 GB 可用内存和 5 GB 可用磁盘空间
-- 容器运行时允许 `SYS_ADMIN` 与 `SYS_PTRACE` capability
+- x86-64 Linux 主机、Docker Engine（建议 24 或更高版本）和 Docker Compose v2。
+- 容器运行时允许 `SYS_ADMIN`、`SYS_PTRACE`，以及 Compose 中配置的安全选项。
+- 可访问微信安装包、Ubuntu 软件源、Rust 工具链和依赖仓库。
 
-> [!NOTE]
-> 当前镜像安装微信官方 x86-64 软件包，ARM 主机不能直接运行。
+建议为运行服务预留至少 2 GB 可用内存和 5 GB 磁盘空间，并另行规划数据库与附件容量。源码构建需要额外内存和磁盘；这些数值不是经过负载测试的资源下限。当前 Dockerfile 使用微信官方 x86-64 安装包，不提供 ARM 原生镜像。
 
-### 1. 获取项目
+### 1. 下载并配置
+
+以下命令用于首次部署：
 
 ```bash
 git clone https://github.com/qianshulab/MimicWX-Linux.git
 cd MimicWX-Linux
-```
 
-### 2. 创建运行配置
-
-```bash
 cp .env.example .env
 cp config.toml config.local.toml
 install -d -m 700 secrets data/xwechat data/xwechat_files
@@ -117,44 +65,55 @@ openssl rand -hex 4 > secrets/vnc_password.txt
 chmod 600 .env config.local.toml secrets/vnc_password.txt
 ```
 
-生成 API Token，并写入 `config.local.toml` 的 `[api].token`：
+生成 API Token：
 
 ```bash
 openssl rand -hex 32
 ```
 
-默认只监听 `127.0.0.1`。如需从可信局域网直接访问，将 `.env` 中的 `MIMICWX_BIND_IP` 改为主机的局域网地址。
+将生成值填入 `config.local.toml` 的 `[api]` 配置：
 
-### 3. 启动
+```toml
+[api]
+token = "YOUR_RANDOM_API_TOKEN"
+```
+
+Token 留空时不启用 API 认证。VNC 密码与 API Token 相互独立。
+
+默认端口仅绑定 `127.0.0.1`。远程访问可使用 SSH 隧道；需要直接从可信局域网访问时，将 `.env` 中的 `MIMICWX_BIND_IP` 设置为部署主机的局域网地址。具体配置见[网络配置](docs/DEPLOYMENT.zh-CN.md#4-网络配置)。
+
+### 2. 构建并启动
 
 ```bash
 docker compose up -d --build
 docker compose ps
 ```
 
-### 4. 登录与检查
+镜像从本仓库源码构建。默认使用国内依赖镜像源；使用上游源时，在 `.env` 中设置 `MIMICWX_USE_MIRROR=0`。代理配置见[镜像源与代理](docs/DEPLOYMENT.zh-CN.md#5-镜像源与代理)。
 
-打开以下地址，用 `secrets/vnc_password.txt` 中的密码连接，然后在虚拟桌面内扫码登录微信：
+### 3. 登录微信
+
+打开 noVNC，使用 `secrets/vnc_password.txt` 中的密码连接桌面，再扫码或在手机端确认登录：
 
 ```text
 http://HOST:6080/vnc.html?autoconnect=true&resize=scale
 ```
 
-检查服务状态：
+`HOST` 为部署主机地址；本机访问或 SSH 隧道访问时使用 `127.0.0.1`。
+
+查询运行状态：
 
 ```bash
 curl --fail http://HOST:8899/status
 ```
 
-当账号已登录且 `db_available` 为 `true` 时，数据库消息接口可以开始工作。
+消息接入前应确认响应中 `status` 为 `"已登录"`，且 `db_available` 为 `true`。HTTP 200 或容器 `healthy` 只代表状态接口可响应，不代表微信已经登录。
 
-> 国内网络默认使用构建镜像源。其他网络环境可在 `.env` 中设置 `MIMICWX_USE_MIRROR=0`。需要 HTTP 代理时，建议在 Docker 服务层配置，避免把代理凭据写入镜像或仓库。
+Docker 服务随主机启动后，`restart: always` 会自动启动容器。如果微信要求重新登录，需通过 noVNC 完成确认；后台密钥提取与数据库初始化随登录继续执行。操作命令和故障排查见[部署指南](docs/DEPLOYMENT.zh-CN.md)。
 
-完整安装、代理、升级、备份与故障排查说明见 [Docker 部署指南](docs/DEPLOYMENT.zh-CN.md)。
+## 接口接入
 
-## API 快览
-
-除 `GET /status` 外，接口使用 Bearer Token：
+设置非空 API Token 后，除 `GET /status` 外的接口需要认证：
 
 ```http
 Authorization: Bearer YOUR_API_TOKEN
@@ -162,18 +121,27 @@ Authorization: Bearer YOUR_API_TOKEN
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/status` | 登录、数据库和运行状态 |
-| `GET` | `/contacts` | 联系人列表 |
-| `GET` | `/sessions` | 当前会话列表 |
-| `GET` | `/messages` | 按独立游标读取实时消息缓存 |
-| `GET` | `/messages/history` | 从数据库补拉历史消息 |
-| `GET` | `/attachments/{id}` | 下载附件，支持 Range 请求 |
+| `GET` | `/status` | 查询登录、数据库与进程状态 |
+| `GET` | `/contacts`、`/sessions` | 查询联系人和会话 |
+| `GET` | `/messages` | 按游标查询实时缓存，可筛选会话、发送者和方向 |
+| `GET` | `/messages/history` | 按时间和偏移查询本地数据库中的历史消息 |
+| `GET` | `/attachments/{id}` | 下载本地可用的文件附件 |
 | `POST` | `/messages/send` | 向指定会话发送文本 |
-| `POST` | `/messages/reply` | 按消息 ID 回复原会话 |
+| `POST` | `/messages/reply` | 根据缓存中的消息 ID 回复 |
 | `POST` | `/messages/send-file` | 向指定会话发送文件 |
-| `GET` | `/ws` | WebSocket 实时消息流 |
+| `GET` | `/ws` | 订阅 WebSocket 事件 |
 
-发送文本示例：
+接收消息：
+
+```bash
+curl --fail \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
+  "http://HOST:8899/messages?after=0&limit=100&direction=incoming"
+```
+
+同一次服务运行期间，调用方保存响应的 `next_cursor`，并在下次请求中作为 `after` 传入。每个调用方独立保存游标，查询不会删除其他调用方可读取的消息。
+
+发送文本：
 
 ```bash
 curl --fail -X POST http://HOST:8899/messages/send \
@@ -182,72 +150,68 @@ curl --fail -X POST http://HOST:8899/messages/send \
   -d '{"conversation":"文件传输助手","text":"Hello from MimicWX","at":[]}'
 ```
 
-生产消费方应持久化 `message_id` 去重，并在 WebSocket 重连后通过 `/messages/history` 补拉中断期间的消息。完整协议见 [中文 API 参考](docs/API.zh-CN.md)。
+`conversation` 支持会话 ID 或名称。发送请求返回后，应检查 `sent`、`verified` 和 `message`；HTTP 成功不等于对方已收到或已读。
 
-## 消息身份模型
+完整请求参数、响应字段、附件下载和重连补拉流程见 [API 参考](docs/API.zh-CN.md)。
 
-显示名称会变化，也可能重复。新接入应使用稳定 ID 完成去重、归档和消息路由。
+### 会话与发送者
 
-| 字段 | 语义 | 推荐用途 |
+| 字段 | 含义 | 常见用途 |
 | --- | --- | --- |
-| `message_id` | 稳定消息标识 | 幂等、去重、按消息回复 |
-| `conversation_id` | 私聊联系人或群聊 ID | 回复目标与会话分区 |
-| `sender_id` | 实际发送者；群聊中为成员 ID | 用户归属与群成员识别 |
-| `direction` | `incoming`、`outgoing` 或 `system` | 防止重复消费自身回复 |
-| `create_time` | Unix 秒级时间 | 历史补拉水位 |
-| `attachment` | 附件定位与可用状态 | 下载、校验与异步处理 |
+| `message_id` | 消息标识 | 去重、处理记录、缓存内回复定位 |
+| `conversation_id` | 消息所属的私聊或群聊 | 归档分区、回复目标 |
+| `sender_id` | 实际发送者；群聊中为成员 | 关联用户与群成员 |
+| `direction` | `incoming`、`outgoing` 或 `system` | 区分接收、自发和系统消息 |
+| `create_time` | Unix 秒级时间 | 历史查询检查点 |
+| `attachment` | 文件定位、名称、大小和可用状态 | 下载文件 |
 
-接口采用至少一次投递语义：允许安全重放，不保证业务侧恰好一次处理。调用方需要持久化消息 ID、处理状态和历史检查点。
+群消息的 `conversation_id` 指向群，`sender_id` 指向发言成员。应用应保存两者，避免把群成员误作回复会话。
 
-## 配置与数据
+## 工作原理
 
-| 项目 | 默认值或位置 | 说明 |
-| --- | --- | --- |
-| API Token | `config.local.toml` | 生产环境必须设置长随机值 |
-| 主机绑定地址 | `MIMICWX_BIND_IP=127.0.0.1` | API 与 noVNC 的监听地址 |
-| 镜像标签 | `MIMICWX_IMAGE=local/mimicwx-linux:0.6.1` | 建议升级时使用不可变标签 |
-| 微信数据 | `data/xwechat/` | 包含账号数据、数据库和密钥映射 |
-| 微信文件 | `data/xwechat_files/` | 文件接收与缓存目录 |
-| VNC 密码源 | `secrets/vnc_password.txt` | 权限应保持为 `0600` |
+```mermaid
+flowchart LR
+    subgraph Container["Docker 容器"]
+        WX["微信 Linux 客户端"]
+        DB[("本地 WCDB 数据库")]
+        Core["MimicWX API"]
+        Input["AT-SPI2 / X11"]
+        VNC["noVNC 桌面"]
+        WX -->|写入消息| DB
+        DB -->|读取与解析| Core
+        Core -->|发送操作| Input --> WX
+        VNC -->|登录与桌面操作| WX
+    end
+    Core <-->|REST / WebSocket| App["业务应用"]
+```
 
-这些运行文件均已从 Git 排除。备份必须按敏感数据保护，不应上传数据库、密钥、Token、联系人信息或聊天内容。
+数据库模式下，服务读取本地消息增量并提供查询和推送。发送操作由微信界面执行，返回值包含发送及验证结果。noVNC 用于登录和桌面操作，调用方通过 HTTP 或 WebSocket 访问服务。
 
-## 文档
+## 兼容性与限制
 
-| 文档 | 中文 | English |
-| --- | --- | --- |
-| 文档入口 | [文档中心](docs/README.md) | [Documentation hub](docs/README.md#english) |
-| API 参考 | [API.zh-CN.md](docs/API.zh-CN.md) | [API.md](docs/API.md) |
-| Docker 部署 | [DEPLOYMENT.zh-CN.md](docs/DEPLOYMENT.zh-CN.md) | [DEPLOYMENT.md](docs/DEPLOYMENT.md) |
-| 贡献指南 | [CONTRIBUTING.md](CONTRIBUTING.md) | 同一文档含英文摘要 |
-| 安全策略 | [SECURITY.md](SECURITY.md) | Same document |
-| 版本记录 | [CHANGELOG.md](CHANGELOG.md) | Same document |
+- **客户端兼容性**：项目依赖微信内部实现，4.0 与 4.1 的提取路径不代表支持这两个系列的所有版本。Dockerfile 下载官方安装包，重新构建可能引入新的微信版本。
+- **实时缓存**：`/messages` 保存最近 4096 条事件，缓存和游标在进程重启后重置。服务没有持久消息队列或消费确认协议，不能保证至少一次投递。消费方需保存 `message_id` 去重，并通过历史接口补拉本地数据库仍保留的消息。
+- **附件可用性**：文件接口返回本地文件，不会触发微信下载或从 CDN 拉取文件。`available=false` 时，文件可能未下载、已删除或无法匹配；Office 文档、ZIP、APK、EXE 等均以字节形式传输，不执行其内容。
+- **文件发送大小**：默认 JSON 请求体上限为 2 MiB，包含 Base64 和其他字段，因此实际文件需略小于 1.5 MiB。处理函数中的 100 MiB 校验值不代表默认部署可上传该大小。
+- **回复与路由**：按消息 ID 回复仅适用于仍在实时缓存中的消息，且不生成微信原生引用卡片。发送最终通过显示名称选择聊天，同名会话仍需配置可区分的备注或名称。
+- **部署边界**：当前 Compose 包含 `SYS_ADMIN`、`SYS_PTRACE` 和 `unconfined` 安全选项。API 与 noVNC 应限制在可信网络或受保护的访问入口，运行数据按敏感信息保管。
 
-## 安全边界
+## 文档与支持
 
-- 不要把 noVNC 或 API 直接暴露到公网；优先使用受认证的 TLS 反向代理或 SSH 隧道。
-- 容器需要 `SYS_ADMIN` 和 `SYS_PTRACE`，只应运行在可信且隔离的主机上。
-- 文档、压缩包、APK、EXE 等附件均属于不可信输入；下游应执行大小限制、真实类型识别、恶意文件扫描和沙箱解析。
-- 密钥材料只保存在持久化微信数据目录，不写入镜像或版本库。
-- 升级微信客户端或镜像后，应在可回滚环境中验证登录、数据库、接收、下载和发送链路。
+| 文档 | 内容 |
+| --- | --- |
+| [部署指南](docs/DEPLOYMENT.zh-CN.md) | 配置、网络、代理、持久化、升级与排障 |
+| [API 参考](docs/API.zh-CN.md) | 消息模型、查询、实时事件、附件和发送 |
+| [文档索引](docs/README.md) | 中英文文档入口 |
+| [更新日志](CHANGELOG.md) | 版本变更 |
+| [贡献指南](CONTRIBUTING.md) | 开发环境与贡献流程 |
+| [安全策略](SECURITY.md) | 安全问题报告与数据处理要求 |
 
-安全问题请按照 [安全策略](SECURITY.md) 私下报告，不要在公开 Issue 中提交密钥、数据库或聊天数据。
+缺陷和兼容性问题请提交至 [Issues](https://github.com/qianshulab/MimicWX-Linux/issues)，附上项目版本、微信 Linux 版本、复现步骤和脱敏日志。安全问题请按[安全策略](SECURITY.md)报告。
 
-## 项目来源与维护
+## 项目来源与许可证
 
-本仓库是基于 [aisuyi065/MimicWX-Linux](https://github.com/aisuyi065/MimicWX-Linux) 的独立维护衍生版本，保留原项目的 MIT 许可证与版权声明。当前版本重点维护可靠消息消费、身份模型、附件传输、双向发送、数据库密钥生命周期与标准化容器部署。
+本项目基于 [aisuyi065/MimicWX-Linux](https://github.com/aisuyi065/MimicWX-Linux) 独立维护，采用 [MIT License](LICENSE)，保留原项目版权声明。
 
-微信客户端内部实现和数据库格式不属于稳定公共接口。兼容性问题请附带 MimicWX 版本、微信 Linux 版本、Docker 版本、脱敏后的 `/status` 输出和相关日志。
-
-## 参与贡献
-
-欢迎提交缺陷修复、兼容性改进、文档完善和可验证的新能力。开始前请阅读 [贡献指南](CONTRIBUTING.md)，安全漏洞请使用私密报告渠道。
-
-## 致谢
-
-- [wxauto](https://github.com/cluic/wxauto)：独立聊天窗口管理思路
-- `wcdb-key-tool`：微信 4.1 数据库密钥派生兼容实现，固定版本与 MIT 许可证见 `vendor/wcdb-key-tool/`
-
-## License
-
-MimicWX-Linux 使用 [MIT License](LICENSE)。衍生版本保留原项目版权声明，并对后续修改单独标注版权。
+- [wxauto](https://github.com/cluic/wxauto)：独立聊天窗口管理思路。
+- `wcdb-key-tool`：微信 4.1 数据库密钥派生实现，源码与许可证见 [vendor/wcdb-key-tool](vendor/wcdb-key-tool/)。

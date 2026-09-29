@@ -2,22 +2,15 @@
 
 <!-- Explain the problem and the user-visible result of this change. -->
 
-## Scope
-
-<!-- List the files, components, or interfaces intentionally changed. -->
-
 ## Compatibility and security
 
-<!-- Describe API, WeChat-version, storage, network, capability, and rollback impact. Use "No change" where applicable. -->
+<!-- Note breaking changes, migration requirements, and any changes to access or data handling. Omit this section if not applicable. -->
 
 ## Validation
 
-- [ ] `cargo fmt --check`
-- [ ] `cargo test --all-targets`
-- [ ] `docker compose config --quiet`
-- [ ] Relevant runtime flow tested
+<!-- List the checks performed and their results. Explain any relevant checks that could not be run. See CONTRIBUTING.md for checks by change type. -->
 
-## Documentation
+## Checklist
 
 - [ ] User-facing documentation is updated.
 - [ ] `CHANGELOG.md` is updated when behavior changes.

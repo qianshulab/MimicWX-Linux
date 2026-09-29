@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to MimicWX-Linux are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses semantic versioning for its public interface.
+Notable changes to MimicWX-Linux. Entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
@@ -9,7 +9,7 @@ All notable changes to MimicWX-Linux are documented in this file. The format fol
 - Added separate Chinese and English project overviews.
 - Added a documentation hub, bilingual Docker deployment guides, contribution guidelines, and a security policy.
 - Added structured issue forms and a pull request checklist.
-- Standardized terminology, navigation, compatibility notes, and security guidance across the documentation set.
+- Clarified API compatibility, deployment recovery, authentication, and private vulnerability reporting.
 
 ## [0.6.1] - 2026-09-28
 
@@ -33,7 +33,7 @@ All notable changes to MimicWX-Linux are documented in this file. The format fol
 - Conversation-aware text sending, reply-by-message-ID, and generic file sending.
 - Automatic originating-sender mentions for group-message replies.
 - WeChat 4.1 passphrase capture, persistent login watcher, per-database key derivation, page-1 HMAC validation, key-map hot reload, and new-database discovery.
-- Production-oriented Docker Compose defaults, Docker secret support, health checks, and log rotation.
+- Docker Compose configuration with Docker secret support, health checks, restart policies, and log rotation.
 
 ### Compatibility
 

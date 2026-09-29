@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-labelledby="title desc">
   <title id="title">MimicWX-Linux</title>
-  <desc id="desc">Reliable WeChat message and file bridge for Linux</desc>
+  <desc id="desc">WeChat message and file API for Linux</desc>
   <defs>
     <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#0f172a"/>
@@ -35,7 +35,7 @@
 
   <g font-family="Inter, Segoe UI, Arial, sans-serif">
     <text x="378" y="132" fill="#f8fafc" font-size="58" font-weight="700" letter-spacing="-1">MimicWX-Linux</text>
-    <text x="381" y="181" fill="#a7f3d0" font-size="24" font-weight="500">Reliable WeChat message &amp; file bridge for Linux</text>
+    <text x="381" y="181" fill="#a7f3d0" font-size="24" font-weight="500">WeChat message &amp; file API for Linux</text>
     <text x="381" y="226" fill="#cbd5e1" font-size="18">REST · WebSocket · SQLCipher · Docker</text>
   </g>
 </svg>

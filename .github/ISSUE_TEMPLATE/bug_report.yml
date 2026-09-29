@@ -7,12 +7,12 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting a problem. Remove all databases, keys, tokens, contact data, messages, and private attachments before submitting.
+        Remove real WeChat databases, keys, tokens, contact data, messages, and private attachments before submitting. Report security vulnerabilities through [private vulnerability reporting](https://github.com/qianshulab/MimicWX-Linux/security/advisories/new).
 
   - type: checkboxes
     id: checks
     attributes:
-      label: Preflight checks
+      label: Before submitting
       options:
         - label: I searched existing issues and did not find a duplicate.
           required: true
@@ -26,7 +26,7 @@ body:
     attributes:
       label: MimicWX-Linux version
       description: Release version or Git commit SHA.
-      placeholder: v0.6.0 / 8205f15
+      placeholder: v0.6.1 or a Git commit SHA
     validations:
       required: true
 

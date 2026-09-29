@@ -1,25 +1,18 @@
 # 安全策略 / Security Policy
 
-MimicWX-Linux 涉及微信账号数据、数据库密钥、消息内容、附件和具备较高权限的容器 capability。安全问题必须通过私密渠道报告。
+MimicWX-Linux 处理微信账号数据、数据库密钥、消息和附件，并使用 Linux capability 访问客户端进程与文件事件。安全漏洞请通过私密渠道报告。
 
-## 支持版本
+## 版本信息
 
-| 版本 | 安全更新 |
-| --- | --- |
-| `0.6.x` | 支持 |
-| `< 0.6` | 不再主动维护 |
-
-建议始终使用默认分支的最新稳定提交，并在升级前保留可回滚镜像和持久化数据备份。
+报告中请注明版本号或 Git 提交号，并说明是否能在当前 `main` 分支复现。版本变更见 [CHANGELOG.md](CHANGELOG.md)。项目未设定长期支持周期或历史版本回补承诺。
 
 ## 私密报告
 
-请使用仓库页面的 **Security → Report a vulnerability** 提交私密报告：
-
-<https://github.com/qianshulab/MimicWX-Linux/security/advisories/new>
+请通过 [GitHub 私密漏洞报告](https://github.com/qianshulab/MimicWX-Linux/security/advisories/new) 提交。
 
 不要在公开 Issue、Discussion、Pull Request 或日志附件中披露漏洞细节。
 
-报告建议包含：
+报告请包含：
 
 - 受影响版本或 Git 提交号
 - 漏洞类型和潜在影响
@@ -30,9 +23,9 @@ MimicWX-Linux 涉及微信账号数据、数据库密钥、消息内容、附件
 
 请先对所有样本和日志进行脱敏。不要上传真实微信数据库、密钥映射、口令、API Token、联系人信息、聊天内容或私人附件。
 
-## 安全范围
+## 报告范围
 
-优先处理的问题包括：
+与本项目相关的安全问题包括：
 
 - API 认证绕过或 Token 泄露
 - 附件路径穿越、软链接逃逸或任意文件读取
@@ -42,20 +35,16 @@ MimicWX-Linux 涉及微信账号数据、数据库密钥、消息内容、附件
 - noVNC、WebSocket 或反向代理配置导致的访问控制绕过
 - 容器 capability、挂载或启动脚本造成的宿主机影响
 
-以下情况通常不视为项目漏洞：
-
-- 将 noVNC 或 API 无保护地直接暴露到公网
-- 主动关闭 API Token 后产生的未授权访问
-- 宿主机、Docker Engine 或反向代理本身未修复的漏洞
-- 微信官方客户端升级导致的兼容性失效
-- 已在文档中明确说明的至少一次投递和消息重放行为
+微信客户端兼容性问题、消息重放和一般部署故障可通过 [Issues](https://github.com/qianshulab/MimicWX-Linux/issues) 报告。如果问题涉及未授权访问、数据泄露或其他安全影响，请使用私密渠道。
 
 ## 响应与披露
 
-维护者会尽力确认报告、评估影响并协调修复。修复可用前，请避免公开技术细节。完成修复后，可在双方确认的时间发布安全公告与贡献者致谢。
+请在私密报告中讨论复现条件、修复方案和披露时间。修复或缓解措施可用前，请勿公开可用于利用漏洞的细节。项目不承诺固定的响应或修复时限。
 
 ---
 
 ## English summary
 
-Report security issues privately through [GitHub Security Advisories](https://github.com/qianshulab/MimicWX-Linux/security/advisories/new). Do not open a public issue. Include the affected version, impact, prerequisites, reproduction steps, and a proposed mitigation when available. Remove all WeChat databases, keys, tokens, contacts, messages, and private attachments from the report.
+Report vulnerabilities through [GitHub private vulnerability reporting](https://github.com/qianshulab/MimicWX-Linux/security/advisories/new), not public issues. Include the affected version or commit, impact, prerequisites, reproduction steps, and any proposed mitigation. Use synthetic data and remove credentials and personal information.
+
+Discuss remediation and disclosure in the private report. No fixed response time, support period, or backport schedule is guaranteed.
